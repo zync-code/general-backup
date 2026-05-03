@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Build / packaging
+dist/
+build/
+*.tar
+*.tar.zst
+*.tar.gz
+checksums.sha256
+
+# Bundles produced by capture
+general-backup-*.tar.zst
+secrets.age
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local state
+state/
+*.log
+.env
+.env.*
+!.env.example
