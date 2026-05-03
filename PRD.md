@@ -1,13 +1,13 @@
-# general-backup — Full-Server Snapshot & Restore Toolkit
+# general-backup — Stateful-Delta Snapshot & Agent-Driven Restore
 ## Product Requirements Document (PRD)
 
 | | |
 |---|---|
-| **Version** | 1.0.0 |
+| **Version** | 2.0.0 |
 | **Date** | May 2026 |
 | **Status** | DRAFT — implementation start |
 | **Platform** | Bash + Python 3 CLI, Linux (Ubuntu 24.04 reference target) |
-| **Public link** | https://github.com/zync-code/general-backup (README is the public docs) |
+| **Public link** | https://github.com/zync-code/general-backup (this repo IS the bootstrap entry-point) |
 
 ---
 
@@ -17,45 +17,54 @@
 2. [Problem Statement](#2-problem-statement)
 3. [Goals & Non-Goals](#3-goals--non-goals)
 4. [Reference Server Inventory](#4-reference-server-inventory)
-5. [Scope — What Is Captured / Out of Scope](#5-scope--what-is-captured--out-of-scope)
+5. [Scope — What Lives in Git vs What Goes in the Bundle](#5-scope--what-lives-in-git-vs-what-goes-in-the-bundle)
 6. [Architecture & Bundle Format](#6-architecture--bundle-format)
-7. [CLI Surface](#7-cli-surface)
-8. [Capture Pipeline](#8-capture-pipeline)
-9. [Restore / Bootstrap Pipeline](#9-restore--bootstrap-pipeline)
-10. [Secrets & Encryption](#10-secrets--encryption)
-11. [Idempotency, Safety, Verification](#11-idempotency-safety-verification)
-12. [Public Documentation](#12-public-documentation)
-13. [Implementation Roadmap (Issues)](#13-implementation-roadmap-issues)
-14. [Test Plan](#14-test-plan)
-15. [Risks & Mitigation](#15-risks--mitigation)
-16. [Success Metrics](#16-success-metrics)
+7. [Agent-Driven Restore](#7-agent-driven-restore)
+8. [CLI Surface](#8-cli-surface)
+9. [Capture Pipeline](#9-capture-pipeline)
+10. [Restore / Bootstrap Pipeline](#10-restore--bootstrap-pipeline)
+11. [Secrets & Encryption](#11-secrets--encryption)
+12. [Idempotency, Safety, Verification](#12-idempotency-safety-verification)
+13. [Public Documentation](#13-public-documentation)
+14. [Implementation Roadmap (Issues)](#14-implementation-roadmap-issues)
+15. [Test Plan](#15-test-plan)
+16. [Risks & Mitigation](#16-risks--mitigation)
+17. [Success Metrics](#17-success-metrics)
 
 ---
 
 ## 1. Executive Summary
 
-`general-backup` is a single-binary-style CLI toolkit that produces a **complete, restorable snapshot of a Linux server**, and replays that snapshot on a fresh box so the new machine becomes byte-for-byte equivalent to the source.
+`general-backup` rebuilds a Linux server from two ingredients:
 
-It targets the operator who runs many small projects on one VPS: project source trees, PostgreSQL/Redis data, nginx vhosts, PM2 apps, system users, SSH keys, cron, agent/skill orchestration directories. A backup is one tar bundle plus a manifest. A restore is one command on a clean Ubuntu install.
+1. **The git remotes** (GitHub) — every project tree lives there. Source code is never bundled.
+2. **One bundle file** — the **stateful delta** that *cannot* live in git: PostgreSQL dumps, Redis snapshot, encrypted secrets (env files, SSH keys, API tokens), nginx config, pm2 ecosystem, system users, package lists, orchestrator/agent state.
 
-The deliverable is:
+This repo (`zync-code/general-backup`) is itself the **bootstrap entry point**. On a fresh Ubuntu 24.04 box:
 
-1. A GitHub repo `zync-code/general-backup` with the toolkit and thorough README — this is the **public documentation link**.
-2. Two executables: `general-backup capture` and `general-backup restore`.
-3. A `bootstrap.sh` for the fresh box, plus a `verify` mode for round-trip testing.
+```bash
+git clone https://github.com/zync-code/general-backup.git
+cd general-backup
+./bootstrap.sh                       # installs apt + node + pnpm + pm2 + postgres + redis + age
+general-backup restore <bundle.tar.zst>
+```
+
+A Claude agent (via the orchestrator already used by `bot`) then reads the bundle's `manifest.json` plus the shipped `restore-runbook.md` and orchestrates the restore: clones each project from its recorded GitHub URL at the captured SHA, applies its env file, hooks up its PM2 entry, restores its database, reloads nginx.
+
+Result: a server that is functionally identical to the source — without ever shipping project source code through the bundle.
 
 ---
 
 ## 2. Problem Statement
 
-The current server hosts ~20 projects, 10 PostgreSQL databases, a Redis with 16k+ keys, 20 PM2 processes, 5 nginx vhosts, an orchestrator with logs/state, and a Telegram bot. There is **no automated way** to:
+The reference server hosts ~20 projects, 10 PostgreSQL databases, 20 PM2 processes, 5 nginx vhosts, and a multi-agent orchestrator. There is no automated way to:
 
-- Move all of this to a new VPS in a single command.
-- Take a periodic full snapshot for disaster recovery.
-- Reproduce the box deterministically (apt packages, node version, pnpm globals, PM2 ecosystem).
-- Audit *what* would actually be restored before running a restore.
+- Push every project to its GitHub remote in one shot before a snapshot.
+- Capture the *non-git* state (DBs, secrets, configs, system users) into one transferable artifact.
+- Reproduce the box on a new VPS by combining "git pull all projects" + "apply state delta".
+- Treat restore as an *agent-orchestrated* sequence rather than a brittle monolithic shell script.
 
-Manual recovery would mean re-running a year's worth of ad-hoc setup steps. This tool is the codified version of those steps.
+`general-backup` is the codified, agent-aware version of all of that.
 
 ---
 
@@ -63,84 +72,94 @@ Manual recovery would mean re-running a year's worth of ad-hoc setup steps. This
 
 ### Goals (P0)
 
-- **Single capture command** that produces one bundle file containing everything required to rebuild the server.
-- **Single restore command** that, given a bundle and a fresh Ubuntu 24.04 host, brings up an identical server: same projects on disk, same DB contents, same nginx config, same PM2 apps online, same users, same agent/skill setup.
-- **Idempotent restore** — running it twice yields the same end state; partial failures are resumable.
-- **Encrypted secrets** — `.env`, SSH private keys, API tokens never appear in the bundle in plaintext.
-- **Public README** on GitHub describing exactly how the tool works and how to use it.
-- **Self-contained** — no cloud dependency. Bundle is a local file the user can scp anywhere.
+- **Pre-capture git-sync**: every registered project is committed (snapshot commit if dirty) and pushed to its GitHub remote before bundling. Manifest records each project's `{git_url, branch, sha, env_path, deploy_type, pm2_apps}`.
+- **Lean bundle**: contains only state that cannot be reconstructed from git (DBs, secrets, configs, package lists, system users, orchestrator config + Claude config).
+- **`general-backup` repo is the bootstrap**: cloning it onto a fresh server gives `bootstrap.sh`, the `general-backup` CLI, and `restore-runbook.md`. No external installer.
+- **Agent-driven restore**: a Claude agent on the target box reads the manifest + runbook and orchestrates per-project restore (clone → install → env → DB → pm2). Shell scripts are building blocks; the agent decides ordering and handles per-project quirks via `~/.orchestrator/config/projects.json` semantics.
+- **Idempotent and resumable**: re-running restore picks up where a failed phase left off via done-markers.
+- **Encrypted secrets**: env files, SSH keys, tokens, role passwords pass through age before touching disk in the bundle.
 
 ### Goals (P1)
 
-- **Diff mode** — show what would change on the target before applying.
-- **Selective capture/restore** — `--only projects,postgres` style filters.
-- **Compression + checksumming** for bundle integrity.
-- **Cron-installable** for periodic snapshots.
+- **Selective capture/restore** via `--include/--exclude`.
+- **Diff mode** (`general-backup diff <bundle>`) shows what restore would change on the current host.
+- **Periodic capture** via `general-backup install-cron` (daily snapshot retention N=7 by default).
+- **Push freshness check**: capture refuses if any project has unpushed commits and `--allow-snapshot-commit` was not given.
 
 ### Non-Goals (v1)
 
-- Continuous replication or streaming backup.
-- Cross-distro restore (Debian, Alpine, RHEL — Ubuntu 24.04 only in v1).
-- Backing up arbitrary system-wide state outside the documented scope (kernel modules, custom systemd units beyond a documented allowlist).
-- Multi-node cluster restore.
+- Bundling project source code (it lives in GitHub — that's the whole point).
+- Continuous replication / streaming.
+- Cross-distro restore (Ubuntu 24.04 only in v1).
 - Web UI.
+- Multi-node clusters.
 
 ---
 
 ## 4. Reference Server Inventory
 
-This is the inventory of the source server. Restore must reproduce all of it.
-
 | Layer | What lives here |
 |---|---|
-| **OS** | Ubuntu 24.04.1 LTS (noble), single regular user `bot` (uid 1000) |
-| **Filesystem footprint** | `/home/bot` 18G — `projects/` 11G, `.claude/` 153M, `.orchestrator/` 152M |
-| **Services (systemd)** | `nginx`, `postgresql@16-main`, `redis-server`, `ssh`, `cron`, `xinetd`, `rsyslog` |
-| **PostgreSQL 16** | 10 user databases: `asap`, `automotive_dev`, `bar7`, `bar7_dev`, `custom_linear`, `devpulse`, `mojpausal`, `pnlmaker`, `procvat`, `qubit` (each with its own role) |
-| **Redis** | db0 (~16,540 keys), db1 (~13 keys) |
-| **PM2 (ecosystem)** | ~20 processes including `automotive-{web,api,scraper}`, `dev-pulse-{web,api,worker}`, `asap-{api,web}`, `restoran-{api,web}`, `lekopis-web`, `moj-pausal-web`, `pnl-maker-backend`, `custom-linear-api`, `qa-tool-web`, `qr-scanner-qr-generator`, `procvat`, `command-center`, telegram bot worker |
-| **nginx** | `/etc/nginx/sites-enabled/`: `landlify.com`, `lekopis.com`, `main`, `mojpausal.com`, `viewermd.com`. `/etc/nginx/conf.d/`: `security.conf`, `ws-upgrade-map.conf`. Per-app includes under `~/.orchestrator/nginx/{sites,locations}/` |
-| **Project trees** | 20 directories under `/home/bot/projects/` (Automotive, Bar7, Lekopis, Lokica, Perica, TestFlow, ajjej, asap, command-center, copy-trading, custom-linear, dev-pulse, godswill-presentation, moj-pausal, nikola, pnl-maker, procvat, qa-tool, qr-scanner, restoran). Each has `.env`, `node_modules` (excludable), source code, and a git remote |
-| **Orchestrator** | `~/.orchestrator/`: commands/, lib/, bot/, config/projects.json, logs/, claude/commands/ — full multi-agent automation runtime |
-| **Claude config** | `~/.claude/`: settings.json, settings.local.json, plugins/, commands/, plus state dirs (projects, sessions, history, plans) — capture configs and plugins, exclude history caches |
-| **System config** | `~/.config/{gh,pnpm,turborepo,...}` — token-bearing; treat as secrets |
-| **SSH** | `~/.ssh/id_ed25519{,.pub}`, `known_hosts`, `authorized_keys` |
-| **Cron** | bot crontab (currently empty, but include in capture); root crontab if accessible |
-| **Toolchain** | Node 18.19.1, pnpm, pm2 6.0.14, Python 3.12.3, ~1067 apt packages |
-| **No-op** | No Docker workloads. No letsencrypt certs in `/etc/letsencrypt/live/`. No MySQL/MongoDB/ES. |
+| **OS** | Ubuntu 24.04.1 LTS, single regular user `bot` (uid 1000) |
+| **Filesystem footprint** | `/home/bot` 18G — `projects/` 11G (will NOT go in bundle), `.claude/` 153M, `.orchestrator/` 152M |
+| **Services** | nginx, postgresql@16-main (5432), redis-server (6379), ssh, cron |
+| **PostgreSQL 16** | 10 user dbs: asap, automotive_dev, bar7, bar7_dev, custom_linear, devpulse, mojpausal, pnlmaker, procvat, qubit |
+| **Redis** | db0 ~16,540 keys; db1 ~13 keys |
+| **PM2** | ~20 processes (automotive-{web,api,scraper}, dev-pulse-{web,api,worker}, asap-{api,web}, restoran-{api,web}, lekopis-web, moj-pausal-{web,bot}, pnl-maker-backend, custom-linear-api, qa-tool-web, qr-scanner-qr-generator, procvat, command-center, copy-trading-trades-api, …) |
+| **nginx** | sites-enabled: landlify.com, lekopis.com, main, mojpausal.com, viewermd.com. conf.d: security.conf, ws-upgrade-map.conf. Per-app includes under `~/.orchestrator/nginx/{sites,locations}/` |
+| **Project trees** | 20 dirs under `/home/bot/projects/` — **each has a GitHub remote** registered in `~/.orchestrator/config/projects.json`. Source goes through git, not the bundle. |
+| **Orchestrator** | `~/.orchestrator/` — multi-agent runtime (commands, lib, bot, config, logs). Goes in bundle (logs filterable). |
+| **Claude config** | `~/.claude/` — settings, plugins, commands. Filtered subset goes in bundle. |
+| **System config** | `~/.config/{gh,pnpm,turborepo,...}` — token-bearing → secrets vault. |
+| **SSH** | `~/.ssh/id_ed25519{,.pub}`, `known_hosts` → secrets vault. |
+| **Toolchain** | Node 18.19.1, pnpm, pm2 6.0.14, Python 3.12.3 — versions pinned in manifest, replayed by `bootstrap.sh`. |
 
-A full live inventory is regenerated at capture time — this table is the **starting reference**, not a hardcoded list.
+The inventory is regenerated live at every capture; this table is the starting reference.
 
 ---
 
-## 5. Scope — What Is Captured / Out of Scope
+## 5. Scope — What Lives in Git vs What Goes in the Bundle
 
-### IN scope (must be in the bundle)
+### LIVES IN GIT (NOT bundled — restored via `git clone`)
 
-- All directories under `/home/bot/projects/` excluding `node_modules`, `.next`, `dist`, `build`, `.turbo`, `.cache`, `coverage` (regenerable from `pnpm install`).
-- `~/.orchestrator/` in full (configs, logs optional via flag, code).
-- `~/.claude/` (settings, plugins, commands, plans) — exclude `cache/`, `paste-cache/`, `shell-snapshots/`, `telemetry/`, `file-history/`, `history.jsonl`.
-- `~/.config/` (gh tokens, pnpm config, turborepo).
-- `~/.ssh/` (full directory, encrypted in the secrets vault).
-- `~/.bashrc`, `~/.profile`, `~/.bash_history` (optional).
-- `pg_dumpall --globals-only` + per-database `pg_dump --format=custom` for every non-template DB.
-- `redis-cli --rdb` snapshot of running Redis, plus `CONFIG GET *` capture for non-default settings.
-- `pm2 save` output (`~/.pm2/dump.pm2`) and `pm2 jlist` JSON for verification.
-- nginx: `/etc/nginx/nginx.conf`, `/etc/nginx/sites-available/*`, `/etc/nginx/sites-enabled/*` (as symlink list), `/etc/nginx/conf.d/*`.
-- Cron: `crontab -l` for `bot`; `/etc/cron.d/*`, `/etc/cron.{daily,hourly,weekly,monthly}/*` (root-readable subset best-effort).
-- System users: `/etc/passwd`, `/etc/group`, `/etc/shadow` (encrypted), `/etc/sudoers.d/*` — sufficient to recreate non-system users and their groups.
-- Package lists: `dpkg --get-selections`, `apt-mark showmanual`, `pnpm ls -g --json`, `pip3 freeze`, `npm ls -g --json`.
-- All `.env*` files discovered under projects (encrypted).
-- A `manifest.json` describing source hostname, OS, captured version, file checksums, capture timestamp.
+- Every directory under `/home/bot/projects/` whose registry entry has a `github_repo`.
+- Project source, lockfiles, config (`PRD.md`, `CLAUDE.md`, `package.json`, `ecosystem.config.js`, etc).
+- Project `.claude/settings.json` (committed in repo).
 
-### OUT of scope (v1)
+### IN THE BUNDLE (cannot live in git)
 
-- Full `/etc` snapshot (only documented files above).
-- `/var/log` (regenerable; pollutes bundle).
-- Kernel/initramfs/grub.
-- Mail spool, printer config.
-- Hardware-specific tunables (`/etc/sysctl.d` only if user opts in via `--include-sysctl`).
-- Anything outside the documented allowlist — exotic state must be added via PR.
+- **Per-project state**:
+  - `.env*` files → secrets vault
+  - PostgreSQL data (per-DB dumps + globals + role passwords)
+  - Redis snapshot
+  - PM2 `dump.pm2` + per-process metadata for resurrection
+  - SQLite/file-based DBs found under project trees (none currently, but supported)
+- **System / shared state**:
+  - nginx full config (`/etc/nginx/{nginx.conf,sites-available/,conf.d/}`, sites-enabled symlink map)
+  - cron (bot crontab + `/etc/cron.d/*`)
+  - System users delta (`/etc/passwd`, `/etc/group` for non-system uids; `/etc/shadow`, `/etc/sudoers.d/*` → secrets vault)
+  - apt manual package list, pnpm/npm globals, pip freeze
+- **Operator state**:
+  - `~/.orchestrator/` (configs, lib, commands, claude/commands; logs optional via `--include-logs`)
+  - `~/.claude/` (settings, settings.local, plugins, commands, projects/, plans/) — exclude cache, paste-cache, shell-snapshots, telemetry, file-history, history.jsonl
+  - `~/.config/` (gh, pnpm, turborepo)
+  - `~/.ssh/` → secrets vault
+  - `~/.bashrc`, `~/.profile`
+- **Manifest & integrity**:
+  - `manifest.json` (host info, project map, component sizes, checksums reference)
+  - `checksums.sha256`
+  - `restore-runbook.md` snapshot (the version that captured this bundle)
+
+### Pre-capture sync rule
+
+For every entry in `~/.orchestrator/config/projects.json` with a `github_repo`:
+
+1. `cd <project_dir>`
+2. If working tree clean → `git push origin <current-branch>` (no-op if already pushed).
+3. If working tree dirty:
+   - With `--allow-snapshot-commit` (default ON): `git add -A && git commit -m "snapshot: pre-backup capture YYYY-MM-DDTHH:MM:SSZ"` then push.
+   - Without it: capture aborts with the list of dirty repos.
+4. Record `{name, git_url, branch, sha (after push), deploy_type, env_paths, pm2_apps, db_names}` into `manifest.projects[]`.
 
 ---
 
@@ -149,66 +168,79 @@ A full live inventory is regenerated at capture time — this table is the **sta
 ### High-level flow
 
 ```
-[ source server ]                       [ target server ]
-       |                                       |
-       | general-backup capture                | general-backup restore bundle.tar.zst
-       v                                       v
-  bundle.tar.zst  --- scp/usb/cloud --->   bootstrap.sh + restore phases
-       |                                       |
-   manifest.json                          identical state
-   secrets.age (encrypted)
-   data/{pg,redis,files,...}
+[ source server ]                                 [ fresh Ubuntu 24.04 target ]
+       |                                                       |
+   git push all projects                                        |
+       |                                              git clone general-backup
+   general-backup capture ───── bundle.tar.zst ─────────────────|
+                                                                v
+                                                       ./bootstrap.sh
+                                                                v
+                                                  general-backup restore bundle.tar.zst
+                                                                v
+                                              [agent reads manifest + runbook]
+                                                  ├── git clone each project @ SHA
+                                                  ├── apply env files (secrets.age)
+                                                  ├── pg_restore each DB
+                                                  ├── redis dump.rdb in place
+                                                  ├── nginx config + reload
+                                                  ├── pm2 resurrect
+                                                  └── done-markers per phase
 ```
 
 ### Bundle layout (inside the tarball)
 
 ```
 general-backup-<host>-<UTCstamp>/
-├── manifest.json                  # version, source host, OS, package counts, sha256 of every file
-├── README.txt                     # human-readable summary
-├── secrets.age                    # age-encrypted vault (env files, ssh keys, tokens, /etc/shadow)
+├── manifest.json                  # version, source host, projects map, component summary, checksums ref
+├── restore-runbook.md             # the runbook this bundle was built against
+├── README.txt                     # human-readable summary of what's here
+├── secrets.age                    # age-encrypted vault
 ├── data/
 │   ├── postgres/
-│   │   ├── globals.sql            # roles, tablespaces (no passwords in plain — pulled from secrets.age)
+│   │   ├── globals.sql            # roles & tablespaces (no passwords in plaintext)
 │   │   └── <dbname>.dump          # pg_dump --format=custom per database
 │   ├── redis/
-│   │   ├── dump.rdb               # snapshot
-│   │   └── config.json            # captured non-default CONFIG values
+│   │   ├── dump.rdb
+│   │   └── config.json            # non-default CONFIG values
 │   ├── pm2/
-│   │   ├── dump.pm2               # pm2 save output
-│   │   └── jlist.json             # full process metadata for diff
+│   │   ├── dump.pm2
+│   │   └── jlist.json
 │   ├── nginx/
 │   │   ├── nginx.conf
 │   │   ├── sites-available/
-│   │   ├── sites-enabled.txt      # list of symlink targets
+│   │   ├── sites-enabled.txt      # symlink target list
 │   │   └── conf.d/
 │   ├── cron/
 │   │   ├── bot.crontab
 │   │   └── etc-cron.d/...
 │   └── system/
-│       ├── passwd.delta           # only non-system users
+│       ├── passwd.delta
 │       ├── group.delta
-│       └── sudoers.d/
-├── files/
-│   ├── home-bot.tar.zst           # /home/bot tree, with documented exclusions
-│   ├── orchestrator.tar.zst       # ~/.orchestrator
+│       └── (sudoers, shadow → secrets.age)
+├── state/
+│   ├── orchestrator.tar.zst       # ~/.orchestrator (configs, lib, commands; logs optional)
 │   ├── claude.tar.zst             # ~/.claude (filtered)
-│   └── config.tar.zst             # ~/.config
+│   ├── config.tar.zst             # ~/.config
+│   ├── home-dotfiles.tar.zst      # .bashrc, .profile, .gitconfig
+│   └── projects.json              # ~/.orchestrator/config/projects.json (also embedded in manifest)
 ├── packages/
 │   ├── apt-manual.txt             # apt-mark showmanual
 │   ├── apt-selections.txt         # dpkg --get-selections
 │   ├── npm-global.json
 │   ├── pnpm-global.json
 │   └── pip3-freeze.txt
-└── checksums.sha256               # SHA-256 of every file above; signed if --sign provided
+└── checksums.sha256
 ```
+
+Note: there is no `files/home-bot.tar.zst` of project trees. Projects come from git.
 
 ### Manifest schema (manifest.json)
 
 ```json
 {
-  "schema_version": 1,
-  "tool_version": "1.0.0",
+  "schema_version": 2,
+  "tool_version": "2.0.0",
   "captured_at": "2026-05-03T18:42:11Z",
   "source": {
     "hostname": "5t3i.c.time4vps.cloud",
@@ -217,246 +249,346 @@ general-backup-<host>-<UTCstamp>/
     "user": "bot",
     "uid": 1000
   },
+  "toolchain": {
+    "node": "18.19.1",
+    "pnpm": "...",
+    "pm2": "6.0.14",
+    "python3": "3.12.3",
+    "postgres": "16",
+    "redis": "..."
+  },
+  "projects": [
+    {
+      "name": "Automotive",
+      "git_url": "https://github.com/zync-code/Automotive.git",
+      "branch": "main",
+      "sha": "abc123…",
+      "project_dir": "/home/bot/projects/Automotive",
+      "deploy_type": "nginx",
+      "env_paths": [".env", "apps/web/.env.local", "apps/api/.env"],
+      "pm2_apps": ["automotive-web", "automotive-api", "automotive-scraper"],
+      "db_names": ["automotive_dev"],
+      "post_install": ["pnpm install", "pnpm build"]
+    }
+  ],
   "components": {
-    "postgres": { "databases": ["asap", "automotive_dev", "..."], "version": "16" },
-    "redis": { "db_count": 2, "key_count": 16553 },
-    "pm2": { "process_count": 20 },
-    "nginx": { "vhost_count": 5 },
-    "files": { "home_bot_size_bytes": 19327352832 },
+    "postgres": { "version": "16", "databases": ["asap", "automotive_dev", "..."] },
+    "redis":    { "db_count": 2, "key_count": 16553 },
+    "pm2":      { "process_count": 20 },
+    "nginx":    { "vhost_count": 5, "include_count": 16 },
+    "system":   { "users": ["bot"], "uid_range": [1000, 1000] },
     "packages": { "apt_manual": 412, "pnpm_global": 8 }
   },
-  "exclusions": ["node_modules", ".next", "dist", "build", ".cache", ".turbo", ".claude/cache", ".claude/paste-cache"],
+  "exclusions": ["node_modules", ".next", "dist", "build", ".cache", ".turbo", ".claude/cache", ".claude/paste-cache", ".claude/telemetry", ".claude/file-history"],
   "checksums_file": "checksums.sha256",
-  "secrets_encrypted": true
+  "secrets_encrypted": true,
+  "runbook_sha256": "..."
 }
 ```
 
+The `projects[]` array is the single source of truth restore reads to know what to clone, where to put it, what env to apply, which pm2 entries to expect, and which DBs belong to it.
+
 ---
 
-## 7. CLI Surface
+## 7. Agent-Driven Restore
+
+The repo ships `restore-runbook.md` — a structured prompt aimed at a Claude Code agent running on the target box. The runbook tells the agent:
+
+1. Phase order (bootstrap → packages → users → state-extract → secrets-decrypt → projects-clone → postgres → redis → nginx → pm2 → cron → postcheck).
+2. Which CLI subcommand handles each phase (`general-backup phase <name>`).
+3. How to read `manifest.projects[]` and orchestrate per-project: clone @ sha, install deps, link env, register pm2 app.
+4. Decision rules for ambiguity:
+   - If a project's `pm2_apps` are missing locally, use `data/pm2/dump.pm2` to seed.
+   - If `pnpm install` fails on a project, log it, mark project as `degraded`, continue to next; final report lists degraded projects.
+   - If a database in `manifest.projects[].db_names` doesn't exist in `data/postgres/`, warn but continue.
+5. Post-checks the agent must run: `pm2 jlist | length` matches manifest, `nginx -t` ok, all dbs listable, all projects directories exist with `.git`.
+
+The runbook is plain Markdown, version-controlled, and the agent invocation is documented:
 
 ```bash
-# Capture
+# Inside cloned general-backup, on target:
+./bootstrap.sh                                   # base toolchain + claude-code CLI
+general-backup restore-agent <bundle.tar.zst>    # spawns claude session with runbook + bundle
+```
+
+The `restore-agent` subcommand wraps:
+
+1. Extract bundle to staging dir.
+2. Verify bundle integrity (`general-backup verify`).
+3. Spawn a tmux session running `claude --dangerously-skip-permissions -p "$(cat restore-runbook.md)"` with bundle path + manifest path injected.
+4. Stream agent log to stdout + `/var/log/general-backup-restore.log`.
+
+For operators who prefer scripts, `general-backup restore <bundle>` runs the same phases non-interactively (no LLM in the loop) — agent mode is opt-in but recommended for first-time / unusual restores.
+
+---
+
+## 8. CLI Surface
+
+```bash
+# Capture (always pre-syncs git first)
 general-backup capture \
-    [--out PATH]                  # default: ./general-backup-<host>-<stamp>.tar.zst
-    [--age-recipient RECIPIENT]   # required for secrets encryption (or --age-passphrase)
-    [--include LIST]              # comma list: postgres,redis,files,pm2,nginx,cron,packages,system,all (default: all)
-    [--exclude LIST]              # subtract from --include
-    [--dry-run]                   # print plan, do nothing
-    [--sign KEYFILE]              # sign checksums.sha256
+    [--out PATH]
+    [--age-recipient RECIPIENT]
+    [--include LIST]                  # git-sync,postgres,redis,files,pm2,nginx,cron,packages,system (default: all)
+    [--exclude LIST]
+    [--allow-snapshot-commit | --no-snapshot-commit]   # default: allow
+    [--include-logs]                  # default: false (skip ~/.orchestrator/logs/)
+    [--dry-run]
+    [--sign KEYFILE]
     [--quiet | --verbose]
 
-# Restore
+# Restore (script mode)
 general-backup restore <bundle> \
-    [--target-user bot]
-    [--age-identity FILE]         # required if bundle has secrets.age
-    [--phases LIST]               # bootstrap,packages,users,files,postgres,redis,nginx,pm2,cron (default: all in order)
+    [--age-identity FILE]
+    [--phases LIST]                   # default: all in order
     [--skip-phases LIST]
-    [--dry-run]                   # show diff, no changes
-    [--force]                     # overwrite existing data; required if target is non-empty
+    [--dry-run]
+    [--force]
+
+# Restore (agent mode — recommended for first run)
+general-backup restore-agent <bundle> \
+    [--age-identity FILE]
+    [--auto-confirm]                  # default: false (agent pauses for ack at end)
 
 # Verify
 general-backup verify <bundle>
-    # Checks: tarball integrity, sha256 matches, manifest schema, secrets decryptable
 
 # Diff (planned-vs-current)
 general-backup diff <bundle>
-    # For each component: show what restore would change on this host
 
-# Bootstrap-only (fresh box, no bundle yet)
-general-backup install
-    # Installs apt deps, node, pnpm, pm2, postgres, redis, nginx, age — minimum to receive a bundle
+# Bootstrap-only
+general-backup install                # = ./bootstrap.sh
+general-backup install-cron           # daily capture via cron, retention 7
+
+# Per-phase (advanced)
+general-backup phase capture-postgres
+general-backup phase restore-projects --bundle <path>
 ```
 
-Exit codes: `0` ok, `1` user error, `2` integrity error, `3` partial restore (resumable), `4` permission error.
+Exit codes: 0 ok · 1 user error · 2 integrity error · 3 partial restore (resumable) · 4 permission error · 5 git-sync conflict (dirty repo with `--no-snapshot-commit`).
 
 ---
 
-## 8. Capture Pipeline
+## 9. Capture Pipeline
 
-Phases run in this order; each phase is independently re-runnable.
+Runs in this order. Each phase is independently re-runnable.
 
-1. **preflight** — confirm source identity, free disk for staging, required tools (`pg_dump`, `redis-cli`, `tar`, `zstd`, `age`).
-2. **inventory** — write `manifest.json` skeleton (hostname, OS, sizes).
-3. **packages** — `apt-mark showmanual`, `dpkg --get-selections`, `pnpm ls -g --json`, `npm ls -g --json`, `pip3 freeze`.
-4. **system** — extract non-system entries from `/etc/passwd`, `/etc/group`; copy `/etc/sudoers.d/*` into `secrets.age` (sudoers can leak); shadow lines for non-system users into `secrets.age`.
-5. **nginx** — copy `/etc/nginx/nginx.conf`, `sites-available/`, `conf.d/`; record `sites-enabled` link map.
-6. **cron** — `crontab -l -u bot`, `/etc/cron.d/`, `/etc/cron.{daily,hourly,weekly,monthly}/`.
-7. **postgres** — `pg_dumpall --globals-only --no-role-passwords` (passwords pulled separately into secrets), then per-DB `pg_dump --format=custom --compress=9`.
-8. **redis** — `redis-cli SAVE` then copy the rdb; capture `CONFIG GET *` to JSON.
-9. **pm2** — `pm2 save`, copy `~/.pm2/dump.pm2`, store `pm2 jlist` for verification.
-10. **files** — tar+zstd `/home/bot` with documented exclusions; tar `~/.orchestrator`, `~/.claude` (filtered), `~/.config`.
-11. **secrets** — collect all `.env*` from project tree, `~/.ssh/*`, `~/.config/gh/*`, postgres role passwords (extracted from a controlled query), shadow entries — pipe through `age -r <recipient>` into `secrets.age`.
-12. **checksums** — sha256 every file, write `checksums.sha256`. Optional sign with `--sign`.
-13. **package** — single tarball `<bundle>.tar.zst`. Print path + size + sha256.
+1. **preflight** — verify required tools (`gh`, `git`, `pg_dump`, `redis-cli`, `tar`, `zstd`, `age`); confirm staging disk space; load `~/.orchestrator/config/projects.json`.
+2. **git-sync** — for each project with a `github_repo`:
+   - `git -C <dir> fetch origin`
+   - If clean: ensure all commits pushed.
+   - If dirty + snapshot allowed: `git add -A && git commit -m "snapshot: ..."`; push.
+   - If dirty + not allowed: collect into error list; abort if non-empty.
+   - Capture final SHA, branch, remote URL into `manifest.projects[]`.
+3. **inventory** — write manifest skeleton (host, OS, sizes, toolchain versions).
+4. **packages** — apt manual, dpkg selections, pnpm `ls -g --json`, npm `ls -g --json`, pip3 freeze.
+5. **system** — passwd/group delta for non-system uids; sudoers.d files staged for secrets.age; shadow lines for restored users staged for secrets.age.
+6. **nginx** — copy `/etc/nginx/{nginx.conf,sites-available/,conf.d/}`; record `sites-enabled` symlink map.
+7. **cron** — `crontab -l -u bot`, `/etc/cron.d/`, `/etc/cron.{daily,hourly,weekly,monthly}/`.
+8. **postgres** — `pg_dumpall --globals-only --no-role-passwords`; `pg_dump --format=custom --compress=9` per DB; extract role password hashes from `pg_authid` (requires SUPERUSER) → `secrets.age`.
+9. **redis** — `redis-cli SAVE`; copy rdb; `CONFIG GET *` → diff vs default → `config.json`.
+10. **pm2** — `pm2 save`; copy `~/.pm2/dump.pm2`; `pm2 jlist > jlist.json`.
+11. **state** — tar+zstd `~/.orchestrator` (excl `logs/` unless `--include-logs`), `~/.claude` (filtered), `~/.config`, dotfiles.
+12. **secrets** — gather all `.env*` from project trees (paths recorded in `manifest.projects[].env_paths`), `~/.ssh/*`, `~/.config/gh/*`, postgres role passwords, sudoers, shadow → pipe through `age -r <recipient>` → `secrets.age`.
+13. **checksums** — sha256 every bundle file → `checksums.sha256`. Optional sign with `--sign`.
+14. **package** — final `tar -I zstd <bundle>.tar.zst`. Print path, size, sha256, capture duration.
 
-A capture must complete in O(minutes) on this server's data volume. PostgreSQL dumps and the home tree dominate; everything else is sub-second.
-
----
-
-## 9. Restore / Bootstrap Pipeline
-
-Designed for a **fresh Ubuntu 24.04 install** with sudo access.
-
-Phases:
-
-1. **bootstrap** — install: `tar`, `zstd`, `age`, `curl`, `git`, `build-essential`, `nginx`, `redis-server`, `postgresql-16`, `python3`, `nodejs` (NodeSource 18.x), `pnpm` (corepack), `pm2` (npm -g). Match versions from `manifest.json` where pinned.
-2. **packages** — `apt-mark` and `dpkg --set-selections` to recreate the manual package set; `apt-get update && apt-get dselect-upgrade`.
-3. **users** — create user `bot` with same uid (1000) if absent; restore non-system /etc/passwd/group entries from delta; restore shadow from secrets vault; restore sudoers.d/*.
-4. **files** — extract `home-bot.tar.zst` into `/home/bot/`; extract `orchestrator.tar.zst` and `claude.tar.zst` to `/home/bot/.orchestrator` and `/home/bot/.claude`; extract `config.tar.zst` to `/home/bot/.config`; chown `-R bot:bot /home/bot`.
-5. **secrets** — decrypt `secrets.age` to a temp dir, install `~/.ssh/*` with `chmod 600`, install env files at the project paths recorded in the manifest, install `gh` token, install postgres role passwords for the next phase.
-6. **postgres** — `pg_ctlcluster 16 main start`; restore globals (`globals.sql`); `ALTER ROLE` the captured passwords; `createdb -O <owner>` per DB; `pg_restore --format=custom -d <db>` per DB.
-7. **redis** — stop redis; copy `dump.rdb` into `/var/lib/redis/`; `chown redis:redis`; apply non-default CONFIG; start redis.
-8. **nginx** — copy `/etc/nginx/{nginx.conf,sites-available/,conf.d/}`; recreate `sites-enabled` symlinks per the captured map; `nginx -t && systemctl reload nginx`.
-9. **pm2** — as user bot: `pm2 resurrect` from the captured `dump.pm2`; verify with `pm2 jlist` count matches manifest; `pm2 save && pm2 startup systemd`.
-10. **cron** — install bot crontab and `/etc/cron.d/*` files.
-11. **postcheck** — run `general-backup verify --live` to compare manifest snapshot vs current host.
-
-Each phase logs to `/var/log/general-backup-restore.log`. Phases are resumable — on re-run, a phase is skipped if its done-marker file exists in `/var/lib/general-backup/state/`.
+Target wall time on the reference server: < 5 min.
 
 ---
 
-## 10. Secrets & Encryption
+## 10. Restore / Bootstrap Pipeline
 
-- **Encryption tool**: [age](https://github.com/FiloSottile/age). Apt-installable.
-- **Mode**: recipient-based (X25519 public key) by default; passphrase mode supported via `--age-passphrase`.
-- **What goes into secrets.age** (and is *never* in plaintext anywhere else in the bundle):
+Runs on a fresh Ubuntu 24.04 box with sudo access. Phases write done-markers under `/var/lib/general-backup/state/`.
+
+1. **bootstrap** — install toolchain matching manifest: `tar`, `zstd`, `age`, `curl`, `git`, `build-essential`, `nginx`, `redis-server`, `postgresql-16`, `python3`, `nodejs` (NodeSource X), `pnpm` (corepack), `pm2` (npm -g), `claude-code` (curl install).
+2. **packages** — `dpkg --set-selections` from `apt-selections.txt`; `apt-get update && apt-get dselect-upgrade -y`.
+3. **users** — create `bot` with same uid (1000) if missing; restore non-system passwd/group entries from delta; restore shadow + sudoers.d/* from secrets.age.
+4. **state-extract** — extract `state/orchestrator.tar.zst` → `~/.orchestrator`; `state/claude.tar.zst` → `~/.claude`; `state/config.tar.zst` → `~/.config`; dotfiles to `$HOME`. Chown `bot:bot`.
+5. **secrets-decrypt** — decrypt `secrets.age` to a tmpfs staging dir; install `~/.ssh/*` (chmod 600), env files at recorded paths, gh token at `~/.config/gh/hosts.yml`, role passwords loaded for next phase.
+6. **projects-clone** — for each entry in `manifest.projects[]`:
+   - `mkdir -p <project_dir>` if missing
+   - `git clone <git_url> <project_dir>` (or `git -C fetch + reset --hard <sha>` if exists)
+   - `git -C <project_dir> checkout <sha>`
+   - Place env files from secrets staging at `manifest.projects[i].env_paths`.
+   - `pnpm install --frozen-lockfile` (best-effort; failures noted, project marked `degraded`, continue).
+   - Record per-project status in restore log.
+7. **postgres** — `pg_ctlcluster 16 main start`; `psql -f globals.sql`; `ALTER ROLE` each role with captured password hash; `createdb -O <owner>` per DB (skip if exists); `pg_restore --format=custom -d <db>` per DB.
+8. **redis** — stop redis; copy `dump.rdb` → `/var/lib/redis/dump.rdb`; chown `redis:redis`; apply non-default CONFIG; start redis.
+9. **nginx** — copy nginx config; recreate `sites-enabled` symlinks; `nginx -t && systemctl reload nginx`.
+10. **pm2** — as user bot: `pm2 resurrect` from captured `dump.pm2`; verify count matches `manifest.components.pm2.process_count`; `pm2 save && pm2 startup systemd`.
+11. **cron** — install bot crontab; copy `/etc/cron.d/*`.
+12. **postcheck** — run `general-backup verify --live` + manifest comparison; produce `restore-report.md` with: phases ok/failed, degraded projects, action items.
+
+Each phase emits structured progress to stdout and to `/var/log/general-backup-restore.log`. Idempotent: a failed phase resumes; a successful phase is a no-op.
+
+---
+
+## 11. Secrets & Encryption
+
+- Tool: [age](https://github.com/FiloSottile/age). Apt-installable.
+- Default mode: recipient-based (X25519 public key); passphrase mode supported.
+- Inside `secrets.age`:
   - All `.env*` files (project + system)
-  - `~/.ssh/` entire directory
-  - `~/.config/gh/*` (GitHub tokens)
-  - Postgres role passwords (extracted via SECURITY DEFINER from `pg_authid`, dumped to a JSON map: `{role: pwhash}`)
-  - Shadow lines for restored users
-  - `/etc/sudoers.d/*`
+  - `~/.ssh/` full contents
+  - `~/.config/gh/*`
+  - Postgres role passwords (`pg_authid` extract, JSON map `{role: pwhash}`)
+  - Shadow lines + sudoers.d for restored users
   - `~/.orchestrator/config/settings.json` (telegram bot token, etc)
-- **Plaintext bundle inspection**: `general-backup verify <bundle>` works without the identity; only `restore` and `secrets-show` need the identity.
-- **Key management**: tool does NOT generate keys. README documents `age-keygen -o ~/.config/age/key.txt` and reminds to back the key up *outside the bundle*.
+- `verify` works without identity. `restore` requires identity.
+- README documents `age-keygen -o ~/.config/age/key.txt` and **explicitly warns**: store the age key OUTSIDE the bundle. Lose the key, lose the secrets.
 
 ---
 
-## 11. Idempotency, Safety, Verification
+## 12. Idempotency, Safety, Verification
 
-- **Dry-run** for both capture and restore, listing every action that would happen.
-- **Diff mode** (`general-backup diff bundle.tar.zst`) — show, per component, what differs between the bundle and the current host (DB list diff, package diff, file tree diff via `rsync --dry-run --itemize-changes`, etc).
-- **Done-markers** under `/var/lib/general-backup/state/<phase>.ok` so a partially failed restore resumes from the failed phase, not from scratch.
-- **Refusal of destructive overwrite** by default — restore aborts if `/home/bot` already has content unless `--force` or `--target-user other-user`.
-- **Checksum verification** before any restore phase reads a data file.
-- **Schema versioning** — manifest `schema_version` field; restore refuses bundles with newer schema than the running tool understands.
-
----
-
-## 12. Public Documentation
-
-- The **GitHub repo README** is the public link the user can read. It must contain:
-  - Quickstart (3 commands).
-  - Full inventory of what's captured.
-  - Restore walkthrough with screenshots/text logs.
-  - Bundle layout diagram.
-  - Security notes (encryption, what's in secrets.age, how to manage age keys).
-  - Failure-mode FAQ.
-- `docs/` folder in the repo with deeper material:
-  - `docs/architecture.md` — design rationale.
-  - `docs/restore-runbook.md` — operator runbook for fresh-server restore.
-  - `docs/threat-model.md` — secrets handling, what an attacker with the bundle can/can't do.
-  - `docs/extending.md` — how to add a new component (e.g. backing up a future MongoDB).
-- README links to the latest release tarball under GitHub Releases for one-line install.
+- Dry-run for capture and restore (lists every action).
+- `general-backup diff <bundle>` — per-component delta against current host: missing dbs, extra pm2 processes, missing project repos, package list diff, env-file presence map.
+- Done-markers per phase under `/var/lib/general-backup/state/<phase>.ok` → resumable on retry.
+- Restore refuses overwrite if `~/projects` is non-empty unless `--force`.
+- Checksum verification before any restore phase reads a data file.
+- Schema versioning on manifest; restore refuses bundles with newer schema than the running tool.
+- Capture refuses if any registered project has unpushed commits and `--no-snapshot-commit` is set.
 
 ---
 
-## 13. Implementation Roadmap (Issues)
+## 13. Public Documentation
 
-The agent should create the following GitHub Issues from this PRD and implement them in order. Each is sized for one PR.
+The **GitHub repo itself is the public link**. README must include:
+
+- 60-second quickstart (clone → bootstrap → restore).
+- Inventory diagram of what's in vs out of the bundle.
+- Capture walkthrough.
+- Restore walkthrough (both script and agent modes).
+- Bundle layout diagram.
+- Security notes (encryption model, what an attacker with bundle can/can't do).
+- Failure-mode FAQ.
+
+`docs/` folder:
+
+- `docs/architecture.md` — design rationale (why git, why agent, why age).
+- `docs/restore-runbook.md` — the **canonical agent runbook** (also embedded in every bundle).
+- `docs/threat-model.md`.
+- `docs/extending.md` — adding a new component (e.g. MongoDB or a new project type).
+- `docs/operator-faq.md`.
+
+README links to the latest tagged release.
+
+---
+
+## 14. Implementation Roadmap (Issues)
+
+Each item is sized for one PR.
 
 **Epic A — Foundations**
-1. Initialize repo skeleton: `bin/general-backup` entrypoint, `lib/` for shared bash/python, Makefile, `.gitignore`, MIT LICENSE, baseline README.
-2. Add CLI argument parser (Python, argparse) with `capture`, `restore`, `verify`, `diff`, `install` subcommands stubbed out.
-3. Implement `manifest.py` — dataclass + JSON schema + sha256 helper + writer/reader.
+1. Initialize repo skeleton: `bin/general-backup` Python entrypoint, `lib/`, `bootstrap.sh`, `.gitignore`, MIT LICENSE, baseline README.
+2. CLI argument parser (Python argparse) with subcommands stubbed: `capture`, `restore`, `restore-agent`, `verify`, `diff`, `install`, `install-cron`, `phase`.
+3. `manifest.py` — schema_version 2 dataclass, JSON schema validator, sha256 helper, writer/reader.
 
 **Epic B — Capture pipeline**
-4. Implement `inventory` phase — collect hostname, OS, kernel, sizes; write manifest skeleton.
-5. Implement `packages` phase — apt + pnpm + npm + pip lists.
-6. Implement `system` phase — passwd/group/sudoers delta extraction.
-7. Implement `nginx` phase — copy nginx config tree + sites-enabled symlink map.
-8. Implement `cron` phase — capture user + system cron.
-9. Implement `postgres` phase — globals + per-DB custom-format dumps + role-password extraction into secrets staging.
-10. Implement `redis` phase — SAVE + rdb copy + CONFIG GET diff.
-11. Implement `pm2` phase — pm2 save + jlist capture.
-12. Implement `files` phase — tar+zstd of `/home/bot` and friends, with documented exclusions.
-13. Implement `secrets` phase — gather sensitive files, age-encrypt to `secrets.age`.
-14. Implement `checksums` phase — sha256 every bundle file, optional signing.
-15. Implement bundle packaging — final tar.zst, print summary.
+4. `phase: preflight` — tool availability, staging disk check, projects.json load.
+5. `phase: git-sync` — for each project, push current branch, snapshot-commit dirty trees, record git_url/branch/sha in manifest.projects[].
+6. `phase: inventory` + `phase: packages`.
+7. `phase: system` (passwd/group/sudoers/shadow delta).
+8. `phase: nginx` (config + sites-enabled symlink map).
+9. `phase: cron`.
+10. `phase: postgres` (globals + per-db dump + role pw extraction → secrets staging).
+11. `phase: redis` (SAVE + rdb copy + CONFIG diff).
+12. `phase: pm2` (save + jlist).
+13. `phase: state` (tar+zstd of `.orchestrator`, `.claude` filtered, `.config`, dotfiles).
+14. `phase: secrets` (collect → age-encrypt → secrets.age).
+15. `phase: checksums` + bundle packaging.
 
-**Epic C — Restore / Bootstrap pipeline**
-16. Implement `bootstrap.sh` — apt install of base toolchain on fresh Ubuntu 24.04.
-17. Implement `restore packages` phase.
-18. Implement `restore users` phase (uid-preserving).
-19. Implement `restore files` phase.
-20. Implement `restore secrets` phase (decrypt + place files at recorded paths).
-21. Implement `restore postgres` phase (createdb + pg_restore + ALTER ROLE passwords).
-22. Implement `restore redis` phase.
-23. Implement `restore nginx` phase + reload.
-24. Implement `restore pm2` phase + systemd integration.
-25. Implement `restore cron` phase.
-26. Implement done-markers + resumable phases.
+**Epic C — Restore pipeline (script mode)**
+16. `bootstrap.sh` — apt + node + pnpm + pm2 + postgres + redis + age + claude-code.
+17. `phase: restore-packages` (dpkg set-selections + dselect-upgrade).
+18. `phase: restore-users` (uid-preserving).
+19. `phase: restore-state-extract` (orchestrator/claude/config tarballs).
+20. `phase: restore-secrets-decrypt` (age decrypt → place env, ssh, gh).
+21. `phase: restore-projects` — per manifest.projects[]: clone, checkout sha, place env, pnpm install (best-effort with degraded marking).
+22. `phase: restore-postgres` (globals + ALTER ROLE + createdb + pg_restore).
+23. `phase: restore-redis`.
+24. `phase: restore-nginx` (+ symlink map + reload).
+25. `phase: restore-pm2` (resurrect + systemd startup).
+26. `phase: restore-cron`.
+27. Done-markers + resumability.
 
-**Epic D — Safety & UX**
-27. Implement `dry-run` for capture and restore.
-28. Implement `verify` subcommand (manifest schema + checksum + age decryptability).
-29. Implement `diff` subcommand against a live host.
-30. Implement progress UI (per-phase status lines).
+**Epic D — Agent-driven restore**
+28. Author `docs/restore-runbook.md` (the agent prompt).
+29. Implement `general-backup restore-agent <bundle>` — extract, verify, spawn claude session with runbook in tmux, stream log.
+30. Author per-project decision rules (degraded handling, pm2 conflict, missing db).
 
-**Epic E — Documentation**
-31. Write README quickstart + full feature description.
-32. Write `docs/architecture.md`.
-33. Write `docs/restore-runbook.md` with a worked example.
-34. Write `docs/threat-model.md`.
-35. Write `docs/extending.md`.
+**Epic E — Safety & UX**
+31. Implement `--dry-run` for capture and restore.
+32. Implement `verify` subcommand.
+33. Implement `diff` subcommand against live host.
+34. Progress UI per phase (status lines + duration + bytes).
+35. `install-cron` subcommand — daily capture with N=7 retention.
 
-**Epic F — Tests**
-36. Add `tests/smoke-capture.sh` — capture against current host into a temp file, verify integrity.
-37. Add `tests/restore-in-docker.sh` — spin up a fresh Ubuntu 24.04 docker container, restore the captured bundle, run assertions (postgres dbs exist, pm2 list matches, nginx reloads).
-38. Add CI workflow that runs the smoke + docker round-trip on every PR.
+**Epic F — Documentation**
+36. Quickstart + full-feature README on main.
+37. `docs/architecture.md`.
+38. `docs/restore-runbook.md` (P0 — referenced by Epic D).
+39. `docs/threat-model.md`.
+40. `docs/extending.md`.
+41. `docs/operator-faq.md`.
 
-**Epic G — Release**
-39. Tag v1.0.0; create GitHub Release with prebuilt tarball.
-40. Add install one-liner to README.
+**Epic G — Tests**
+42. `tests/smoke-capture.sh` — capture against current host, verify integrity, no plaintext secret leak.
+43. `tests/git-sync.sh` — capture refuses on dirty + `--no-snapshot-commit`; succeeds with snapshot.
+44. `tests/restore-in-docker.sh` — Docker `ubuntu:24.04`, run bootstrap, run restore (script mode), assert: every manifest.projects[].name has a `.git` at recorded SHA, all dbs restorable, pm2 jlist matches, nginx -t green.
+45. `tests/restore-agent-in-docker.sh` — same but via `restore-agent` mode (claude-code installed in container, runs runbook).
+46. CI workflow running smoke + git-sync + script-restore on every PR; agent-restore weekly (LLM cost).
 
-Tasks 1–15 are P0 (capture works end-to-end). 16–26 are P0 (restore works). 27–30 P1. 31–35 P1 (docs are the public link — ship before tagging). 36–38 P1. 39–40 close-out.
+**Epic H — Release**
+47. Tag v2.0.0, GitHub Release with prebuilt tarball.
+48. README install one-liner pointing at the release.
 
----
-
-## 14. Test Plan
-
-- **Unit-ish**: each phase module exposes a `run(ctx)` function and has a corresponding `test_<phase>.py` with a temp-dir fixture.
-- **Smoke test**: `tests/smoke-capture.sh` runs `general-backup capture --dry-run` against the current host and asserts the planned actions match a golden file. A second test runs a real capture into `/tmp` and asserts: bundle exists, `verify` passes, manifest counts match a live re-inventory.
-- **Round-trip test**: `tests/restore-in-docker.sh` builds a Docker image based on `ubuntu:24.04`, copies in the bundle, runs `general-backup restore`, then asserts:
-  - All databases listed in manifest are restorable + one row count check per DB.
-  - `pm2 jlist | jq '.[].name'` matches manifest.
-  - `nginx -t` succeeds.
-  - `systemctl is-active redis-server postgresql@16-main nginx` all `active`.
-  - `~/.orchestrator/config/projects.json` is byte-identical to source.
-- CI runs both on push.
+P0 = Epics A, B, C, D, F (#36, #38), G (#42, #44). P1 = the rest.
 
 ---
 
-## 15. Risks & Mitigation
+## 15. Test Plan
+
+- **Unit-ish**: each phase module exposes `run(ctx)`; `tests/test_<phase>.py` with temp-dir fixtures.
+- **Smoke** (`tests/smoke-capture.sh`): runs `capture --dry-run` against live host, asserts plan matches golden; runs real capture into `/tmp`, asserts `verify` passes and no plaintext token appears in non-`secrets.age` files (grep regex over checksummed files).
+- **Git-sync semantics** (`tests/git-sync.sh`): seeds a temp project with a dirty change; asserts `--no-snapshot-commit` aborts, default mode commits + pushes (against a local bare-repo origin), manifest records the new SHA.
+- **Round-trip in Docker** (`tests/restore-in-docker.sh`):
+  - Build `ubuntu:24.04` image.
+  - Copy bundle in.
+  - Run `./bootstrap.sh`.
+  - Run `general-backup restore <bundle>`.
+  - Assert: each `manifest.projects[].name` exists at `project_dir`, `git rev-parse HEAD` matches `sha`; postgres dbs match; pm2 jlist count matches; `nginx -t` ok; `systemctl is-active` for postgres/redis/nginx all active.
+- **Agent-restore in Docker** (`tests/restore-agent-in-docker.sh`): same image + `general-backup restore-agent`; assert agent log contains all phase markers and final report says "ok".
+
+---
+
+## 16. Risks & Mitigation
 
 | Risk | Mitigation |
 |---|---|
-| Bundle leaks secrets | Hard rule: anything sensitive goes through `secrets.age`. CI test grep-asserts no plaintext token in non-encrypted files. |
-| Restore order bug bricks fresh server | Phases idempotent + resumable; restore in disposable Docker first; `--dry-run` documented in README. |
-| Postgres role passwords lost | Extracted via authenticated SECURITY DEFINER function during capture; stored in secrets.age; restored via `ALTER ROLE` immediately after `globals.sql`. |
-| pm2 dump format changes between versions | Pin pm2 version in manifest; bootstrap installs that version; `verify` warns on mismatch. |
-| Bundle too large | Default exclude `node_modules`, `.next`, `dist`; zstd level 19; print bundle size after capture. |
-| Two captures racing on same Redis | `redis-cli SAVE` is blocking + fast; document not to run capture during heavy write traffic, or use BGSAVE + wait. |
-| Restoring on non-Ubuntu host silently fails | `bootstrap.sh` checks `/etc/os-release`; refuses on non-Ubuntu unless `--force-os`. |
+| Project has uncommitted local-only fix that's never pushed | Default `--allow-snapshot-commit` ensures it lands on origin before bundle freezes. Operator can opt out. |
+| Git remote unreachable on restore | Restore phase logs the failure, marks project degraded, keeps going; final report lists all unreachable repos. |
+| Snapshot commit pollutes history | Snapshot commits use a fixed prefix (`snapshot:`), are easy to grep & squash later. Operator can disable behavior. |
+| Bundle leaks secrets | Hard rule: anything sensitive goes through secrets.age. CI grep-test on the unencrypted bundle contents fails on any plausible token pattern. |
+| Restore order bug bricks fresh box | Phases idempotent + resumable; mandatory Docker round-trip in CI before merge. |
+| Postgres role passwords lost | Captured from `pg_authid` into secrets.age; restored via ALTER ROLE right after globals.sql. |
+| pm2 dump format drift | Pin pm2 version in manifest; `bootstrap.sh` installs that exact version; `verify` warns on mismatch. |
+| Agent makes wrong call on restore | Runbook is explicit + machine-checkable; agent mode is opt-in; script mode is the deterministic baseline. |
+| `pnpm install` flake on restore | Best-effort with degraded marking; final report lists projects needing manual `pnpm install`. |
+| Two captures racing on Redis | `redis-cli SAVE` is fast; document not to capture during heavy write. |
 
 ---
 
-## 16. Success Metrics
+## 17. Success Metrics
 
-- **Round-trip restore in Docker** completes green in CI.
-- **Bundle size** < 2× the source `du` of the kept files (zstd on text + node-free trees).
-- **Capture wall time** < 5 min on the reference server.
-- **Restore wall time** < 15 min on a fresh 4-core VPS.
-- **Public README** clearly explains all 16 sections of this PRD in a more digestible form, with a runnable quickstart.
-- **One-command quickstart** works: `curl -fsSL .../install.sh | bash && general-backup capture --age-recipient $KEY`.
+- **Round-trip in Docker** green in CI for both script and agent modes.
+- **Bundle size** < 1 GB on the reference server (vs 11 GB if we bundled `projects/`).
+- **Capture wall time** < 5 min (git-sync dominated by network, not bundle size).
+- **Restore wall time** < 15 min on a fresh 4-core VPS (script mode); agent mode adds 1–2 min for LLM orchestration.
+- **Public README** answers: what's in vs out, how restore works, how to manage age key, what fails when.
+- **One-command quickstart** works:
+  ```bash
+  git clone https://github.com/zync-code/general-backup.git && cd general-backup && \
+    ./bootstrap.sh && general-backup restore-agent ~/snapshot.tar.zst
+  ```
