@@ -1,8 +1,13 @@
 """Manifest dataclass + JSON schema + sha256 helpers.
 
 The manifest is the canonical description of a bundle: source host, OS,
-captured component summaries, exclusions list, and a pointer to the
-checksums file. It is `manifest.json` at the root of the unpacked bundle.
+toolchain versions, captured component summaries, the per-project map
+(name, git URL, branch, sha, env paths, pm2 apps, db names), exclusions
+list, and a pointer to the checksums file. It is `manifest.json` at the
+root of the unpacked bundle.
+
+Schema v2 (PRD §6) is the canonical schema. v1 bundles are no longer
+accepted by this tool — they predate the git-based projects model.
 """
 from __future__ import annotations
 
@@ -14,8 +19,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = 1
-TOOL_VERSION = "1.0.0"
+SCHEMA_VERSION = 2
+TOOL_VERSION = "2.0.0"
 
 DEFAULT_EXCLUSIONS: List[str] = [
     "node_modules",
@@ -47,21 +52,88 @@ class Source:
 
 
 @dc.dataclass
+class Toolchain:
+    """Tool versions captured from the source host. Replayed by bootstrap.sh."""
+
+    node: str = ""
+    pnpm: str = ""
+    pm2: str = ""
+    python3: str = ""
+    postgres: str = ""
+    redis: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dc.asdict(self)
+
+
+@dc.dataclass
+class Project:
+    """One project tree restored from git, plus the state needed to wire it
+    back into pm2 / nginx / postgres on the target host.
+
+    `git_url`, `branch`, and `sha` are the *only* things needed to recover
+    source. Everything else here describes how the project plugs into
+    services that were captured in the bundle.
+    """
+
+    name: str
+    git_url: str
+    branch: str
+    sha: str
+    project_dir: str
+    deploy_type: str = ""  # nginx | static | pm2-only | …
+    env_paths: List[str] = dc.field(default_factory=list)
+    pm2_apps: List[str] = dc.field(default_factory=list)
+    db_names: List[str] = dc.field(default_factory=list)
+    post_install: List[str] = dc.field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return dc.asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Project":
+        return cls(
+            name=data["name"],
+            git_url=data["git_url"],
+            branch=data.get("branch", "main"),
+            sha=data.get("sha", ""),
+            project_dir=data.get("project_dir", ""),
+            deploy_type=data.get("deploy_type", ""),
+            env_paths=list(data.get("env_paths", [])),
+            pm2_apps=list(data.get("pm2_apps", [])),
+            db_names=list(data.get("db_names", [])),
+            post_install=list(data.get("post_install", [])),
+        )
+
+
+@dc.dataclass
 class Manifest:
     schema_version: int = SCHEMA_VERSION
     tool_version: str = TOOL_VERSION
     captured_at: str = ""
     source: Optional[Source] = None
+    toolchain: Toolchain = dc.field(default_factory=Toolchain)
+    projects: List[Project] = dc.field(default_factory=list)
     components: Dict[str, Any] = dc.field(default_factory=dict)
     exclusions: List[str] = dc.field(default_factory=lambda: list(DEFAULT_EXCLUSIONS))
     checksums_file: str = "checksums.sha256"
     secrets_encrypted: bool = True
+    runbook_sha256: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        d = dc.asdict(self)
-        if self.source is not None:
-            d["source"] = self.source.to_dict()
-        return d
+        return {
+            "schema_version": self.schema_version,
+            "tool_version": self.tool_version,
+            "captured_at": self.captured_at,
+            "source": self.source.to_dict() if self.source else None,
+            "toolchain": self.toolchain.to_dict(),
+            "projects": [p.to_dict() for p in self.projects],
+            "components": self.components,
+            "exclusions": self.exclusions,
+            "checksums_file": self.checksums_file,
+            "secrets_encrypted": self.secrets_encrypted,
+            "runbook_sha256": self.runbook_sha256,
+        }
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent, sort_keys=True)
@@ -77,15 +149,19 @@ class Manifest:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Manifest":
         src = data.get("source")
+        tc = data.get("toolchain") or {}
         return cls(
             schema_version=data.get("schema_version", SCHEMA_VERSION),
             tool_version=data.get("tool_version", TOOL_VERSION),
             captured_at=data.get("captured_at", ""),
             source=Source(**src) if src else None,
+            toolchain=Toolchain(**tc) if isinstance(tc, dict) else Toolchain(),
+            projects=[Project.from_dict(p) for p in data.get("projects", [])],
             components=data.get("components", {}),
             exclusions=data.get("exclusions", list(DEFAULT_EXCLUSIONS)),
             checksums_file=data.get("checksums_file", "checksums.sha256"),
             secrets_encrypted=data.get("secrets_encrypted", True),
+            runbook_sha256=data.get("runbook_sha256", ""),
         )
 
     def validate(self) -> List[str]:
@@ -98,6 +174,11 @@ class Manifest:
                 f"schema_version {self.schema_version} is newer than this tool understands "
                 f"({SCHEMA_VERSION})"
             )
+        if self.schema_version < SCHEMA_VERSION:
+            errs.append(
+                f"schema_version {self.schema_version} is older than this tool supports "
+                f"({SCHEMA_VERSION}); v1 bundles predate the git-based projects model"
+            )
         if not self.captured_at:
             errs.append("captured_at must be set")
         if self.source is None:
@@ -106,6 +187,17 @@ class Manifest:
             for f in ("hostname", "os", "kernel", "user"):
                 if not getattr(self.source, f, None):
                     errs.append(f"source.{f} must be set")
+        seen: set = set()
+        for i, p in enumerate(self.projects):
+            if not p.name:
+                errs.append(f"projects[{i}].name must be set")
+            if not p.git_url:
+                errs.append(f"projects[{i}].git_url must be set")
+            if not p.sha:
+                errs.append(f"projects[{i}].sha must be set")
+            if p.name in seen:
+                errs.append(f"projects[].name duplicated: {p.name!r}")
+            seen.add(p.name)
         return errs
 
 
