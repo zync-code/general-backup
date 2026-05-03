@@ -1,7 +1,9 @@
 """CLI argument parser for general-backup.
 
-Subcommands: capture, restore, verify, diff, install.
-Each subcommand dispatches to a handler in the corresponding lib module.
+Subcommands per PRD v2 §8:
+  capture, restore, restore-agent, verify, diff, install, install-cron, phase
+
+Each subcommand dispatches to a handler in lib/commands/.
 """
 from __future__ import annotations
 
@@ -11,13 +13,17 @@ from typing import List, Sequence
 
 from . import __version__
 
+# PRD §8 exit codes
 EXIT_OK = 0
 EXIT_USER_ERROR = 1
 EXIT_INTEGRITY = 2
 EXIT_PARTIAL = 3
 EXIT_PERMISSION = 4
+EXIT_GIT_SYNC_CONFLICT = 5
 
 ALL_CAPTURE_PHASES = [
+    "preflight",
+    "git-sync",
     "inventory",
     "packages",
     "system",
@@ -26,23 +32,28 @@ ALL_CAPTURE_PHASES = [
     "postgres",
     "redis",
     "pm2",
-    "files",
+    "state",
     "secrets",
     "checksums",
+    "package",
 ]
 
 ALL_RESTORE_PHASES = [
     "bootstrap",
     "packages",
     "users",
-    "files",
-    "secrets",
+    "state-extract",
+    "secrets-decrypt",
+    "projects-clone",
     "postgres",
     "redis",
     "nginx",
     "pm2",
     "cron",
+    "postcheck",
 ]
+
+ALL_PHASES = sorted(set(ALL_CAPTURE_PHASES) | set(ALL_RESTORE_PHASES))
 
 
 def _csv(value: str) -> List[str]:
@@ -62,7 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
     cap = sub.add_parser("capture", help="Produce a bundle from this host")
     cap.add_argument("--out", help="Output bundle path (default: ./general-backup-<host>-<stamp>.tar.zst)")
     cap.add_argument("--age-recipient", help="age recipient public key (X25519)")
-    cap.add_argument("--age-passphrase", action="store_true", help="Use a passphrase instead of a recipient key")
     cap.add_argument(
         "--include",
         type=_csv,
@@ -70,13 +80,32 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Comma list of phases to include (default: all). Choices: all,{','.join(ALL_CAPTURE_PHASES)}",
     )
     cap.add_argument("--exclude", type=_csv, default=[], help="Phases to subtract from --include")
+    snapshot_group = cap.add_mutually_exclusive_group()
+    snapshot_group.add_argument(
+        "--allow-snapshot-commit",
+        dest="allow_snapshot_commit",
+        action="store_true",
+        default=True,
+        help="Snapshot-commit dirty trees during git-sync (default)",
+    )
+    snapshot_group.add_argument(
+        "--no-snapshot-commit",
+        dest="allow_snapshot_commit",
+        action="store_false",
+        help="Refuse to snapshot-commit; abort if any project tree is dirty",
+    )
+    cap.add_argument(
+        "--include-logs",
+        action="store_true",
+        help="Include ~/.orchestrator/logs/ in the state archive (default: skip)",
+    )
     cap.add_argument("--dry-run", action="store_true", help="Print plan, do nothing")
     cap.add_argument("--sign", help="Path to a signing key for checksums.sha256")
     cap.add_argument("--quiet", action="store_true")
     cap.add_argument("--verbose", action="store_true")
 
-    # restore
-    rs = sub.add_parser("restore", help="Replay a bundle on a fresh host")
+    # restore (script mode)
+    rs = sub.add_parser("restore", help="Replay a bundle on a fresh host (non-interactive)")
     rs.add_argument("bundle", help="Path to bundle .tar.zst")
     rs.add_argument("--target-user", default="bot")
     rs.add_argument("--age-identity", help="Path to age identity (private key) file")
@@ -92,6 +121,21 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--quiet", action="store_true")
     rs.add_argument("--verbose", action="store_true")
 
+    # restore-agent (LLM-driven)
+    ra = sub.add_parser(
+        "restore-agent",
+        help="Replay a bundle by spawning a Claude agent against the runbook",
+    )
+    ra.add_argument("bundle", help="Path to bundle .tar.zst")
+    ra.add_argument("--age-identity", help="Path to age identity (private key) file")
+    ra.add_argument(
+        "--auto-confirm",
+        action="store_true",
+        help="Skip the agent's pause-for-ack at end of run (default: pause)",
+    )
+    ra.add_argument("--quiet", action="store_true")
+    ra.add_argument("--verbose", action="store_true")
+
     # verify
     vf = sub.add_parser("verify", help="Verify bundle integrity")
     vf.add_argument("bundle", help="Path to bundle .tar.zst")
@@ -105,6 +149,43 @@ def build_parser() -> argparse.ArgumentParser:
     # install
     ins = sub.add_parser("install", help="Bootstrap apt deps on a fresh Ubuntu 24.04 host")
     ins.add_argument("--force-os", action="store_true", help="Skip the Ubuntu 24.04 check")
+
+    # install-cron
+    ic = sub.add_parser(
+        "install-cron",
+        help="Install /etc/cron.d/general-backup for daily captures with retention",
+    )
+    ic.add_argument(
+        "--retain",
+        type=int,
+        default=7,
+        help="Number of bundles to retain (default: 7)",
+    )
+    ic.add_argument(
+        "--out-dir",
+        default="/var/backups/general-backup",
+        help="Directory where daily bundles are written",
+    )
+    ic.add_argument("--age-recipient", help="age recipient public key for capture")
+
+    # phase (advanced — run a single phase by name)
+    ph = sub.add_parser(
+        "phase",
+        help="Run a single capture or restore phase (advanced)",
+    )
+    ph.add_argument("name", choices=ALL_PHASES, help="Phase name")
+    ph.add_argument("--bundle", help="Bundle path (required for restore-side phases)")
+    ph.add_argument("--age-identity", help="age identity for secrets-decrypt phase")
+    ph.add_argument("--age-recipient", help="age recipient for secrets phase")
+    ph.add_argument("--out", help="Output path for capture-side phases")
+    ph.add_argument(
+        "--include-logs",
+        action="store_true",
+        help="(state phase) include ~/.orchestrator/logs/",
+    )
+    ph.add_argument("--dry-run", action="store_true")
+    ph.add_argument("--quiet", action="store_true")
+    ph.add_argument("--verbose", action="store_true")
 
     return p
 
@@ -139,6 +220,10 @@ def main(argv: Sequence[str]) -> int:
         phases = _resolve_restore_phases(args.phases, args.skip_phases)
         return cmd.run(args, phases)
 
+    if args.command == "restore-agent":
+        from .commands import restore_agent as cmd
+        return cmd.run(args)
+
     if args.command == "verify":
         from .commands import verify as cmd
         return cmd.run(args)
@@ -149,6 +234,14 @@ def main(argv: Sequence[str]) -> int:
 
     if args.command == "install":
         from .commands import install as cmd
+        return cmd.run(args)
+
+    if args.command == "install-cron":
+        from .commands import install_cron as cmd
+        return cmd.run(args)
+
+    if args.command == "phase":
+        from .commands import phase as cmd
         return cmd.run(args)
 
     parser.error(f"unknown command: {args.command}")
