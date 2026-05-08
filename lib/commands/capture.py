@@ -68,6 +68,9 @@ def _run_pipeline(
             warn(f"capture: no implementation for phase {phase!r} — skipping")
             continue
 
+        if phase == "checksums":
+            manifest.write(staging / "manifest.json")
+
         info(f"capture: [{phase}] starting")
         try:
             mod = importlib.import_module(f"lib.phases.{module_name}")
