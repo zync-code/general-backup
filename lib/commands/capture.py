@@ -70,7 +70,7 @@ def _run_pipeline(
 
         info(f"capture: [{phase}] starting")
         try:
-            mod = importlib.import_module(f"..phases.{module_name}", package=__name__)
+            mod = importlib.import_module(f"lib.phases.{module_name}")
             mod.run(ctx)
             info(f"capture: [{phase}] done")
         except PhaseError as exc:

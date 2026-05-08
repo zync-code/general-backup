@@ -108,7 +108,7 @@ def run(args, phases: List[str]) -> int:
 
         info(f"restore: [{phase}] starting")
         try:
-            mod = importlib.import_module(f"..phases.{module_name}", package=__name__)
+            mod = importlib.import_module(f"lib.phases.{module_name}")
             mod.run(ctx)
             mark_done(phase)
             info(f"restore: [{phase}] done")

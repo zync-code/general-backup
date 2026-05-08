@@ -106,7 +106,7 @@ def _run_restore_phase(name: str, args) -> int:
         return 1
 
     try:
-        mod = importlib.import_module(f"..phases.{module_name}", package=__name__)
+        mod = importlib.import_module(f"lib.phases.{module_name}")
         mod.run(ctx)
         mark_done(name)
         info(f"phase {name!r}: done")
