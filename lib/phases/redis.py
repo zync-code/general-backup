@@ -37,11 +37,17 @@ def run(ctx: Context) -> None:
     if result.returncode != 0:
         warn(f"redis: SAVE failed: {result.stderr.strip()} — dump.rdb may be stale")
 
-    # Copy dump.rdb
+    # Copy dump.rdb (owned by redis user — read via sudo)
     if _RDB_DEFAULT.exists():
-        shutil.copy2(_RDB_DEFAULT, redis_dir / "dump.rdb")
-        size = _RDB_DEFAULT.stat().st_size
-        info(f"redis: copied dump.rdb ({size:,} bytes)")
+        result = subprocess.run(
+            ["sudo", "-u", "redis", "cat", str(_RDB_DEFAULT)],
+            capture_output=True,
+        )
+        if result.returncode == 0 and result.stdout:
+            (redis_dir / "dump.rdb").write_bytes(result.stdout)
+            info(f"redis: copied dump.rdb ({len(result.stdout):,} bytes)")
+        else:
+            warn(f"redis: could not read dump.rdb: {result.stderr.decode()[:100]}")
     else:
         warn(f"redis: {_RDB_DEFAULT} not found — redis data not captured")
 

@@ -47,19 +47,15 @@ def run(ctx: Context) -> None:
 
 
 def _list_databases() -> List[str]:
+    sql = "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;"
     result = subprocess.run(
-        ["sudo", "-u", "postgres", "psql", "-lqt", "--no-align"],
+        ["sudo", "-u", "postgres", "psql", "-t", "--no-align", "-c", sql],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        raise PhaseError(f"psql -lqt failed: {result.stderr.strip()}")
+        raise PhaseError(f"psql list databases failed: {result.stderr.strip()}")
 
-    dbs: List[str] = []
-    for line in result.stdout.splitlines():
-        parts = line.split("|")
-        if parts and parts[0].strip():
-            dbs.append(parts[0].strip())
-    return dbs
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def _dump_globals(output: Path) -> None:
@@ -82,16 +78,15 @@ def _dump_db(db: str, output: Path) -> None:
             "pg_dump",
             "--format=custom",
             "--compress=9",
-            "--file", str(output),
             db,
         ],
-        capture_output=True, text=True,
+        capture_output=True,
     )
     if result.returncode != 0:
-        warn(f"postgres: pg_dump {db!r} failed: {result.stderr[:200]}")
+        warn(f"postgres: pg_dump {db!r} failed: {result.stderr.decode()[:200]}")
     else:
-        size = output.stat().st_size if output.exists() else 0
-        info(f"postgres: {db}.dump ({size:,} bytes)")
+        output.write_bytes(result.stdout)
+        info(f"postgres: {db}.dump ({len(result.stdout):,} bytes)")
 
 
 def _extract_role_passwords(output: Path) -> None:
