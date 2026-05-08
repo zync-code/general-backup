@@ -105,8 +105,27 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--quiet", action="store_true")
     cap.add_argument("--verbose", action="store_true")
 
-    # restore (script mode)
-    rs = sub.add_parser("restore", help="Replay a bundle on a fresh host (non-interactive)")
+    # restore-repo (GitHub server-state repo mode)
+    rr = sub.add_parser(
+        "restore-repo",
+        help="Restore from zync-code/server-state GitHub repo (default restore method)",
+    )
+    rr.add_argument("--capture", help="Capture timestamp to restore (default: latest)")
+    rr.add_argument("--target-user", default="bot")
+    rr.add_argument("--age-identity", required=True, help="Path to age identity (private key) file")
+    rr.add_argument(
+        "--phases",
+        type=_csv,
+        default=["all"],
+        help=f"Phases to run (default: all). Choices: all,{','.join(ALL_RESTORE_PHASES)}",
+    )
+    rr.add_argument("--skip-phases", type=_csv, default=[])
+    rr.add_argument("--dry-run", action="store_true", help="Show plan, make no changes")
+    rr.add_argument("--quiet", action="store_true")
+    rr.add_argument("--verbose", action="store_true")
+
+    # restore (script mode, legacy bundle)
+    rs = sub.add_parser("restore", help="Replay a local bundle .tar.zst (legacy)")
     rs.add_argument("bundle", help="Path to bundle .tar.zst")
     rs.add_argument("--target-user", default="bot")
     rs.add_argument("--age-identity", help="Path to age identity (private key) file")
@@ -223,6 +242,11 @@ def main(argv: Sequence[str]) -> int:
         from .commands import capture as cmd
         use_bundle = bool(getattr(args, "out", None))
         phases = _resolve_capture_phases(args.include, args.exclude, use_bundle=use_bundle)
+        return cmd.run(args, phases)
+
+    if args.command == "restore-repo":
+        from .commands import restore_repo as cmd
+        phases = _resolve_restore_phases(args.phases, args.skip_phases)
         return cmd.run(args, phases)
 
     if args.command == "restore":
