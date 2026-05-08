@@ -60,7 +60,15 @@ class CliParserTests(unittest.TestCase):
 
 class PhaseResolutionTests(unittest.TestCase):
     def test_capture_all(self) -> None:
-        self.assertEqual(_resolve_capture_phases(["all"], []), ALL_CAPTURE_PHASES)
+        # Default (no --out) omits legacy 'package' phase
+        phases = _resolve_capture_phases(["all"], [])
+        self.assertIn("server_state", phases)
+        self.assertNotIn("package", phases)
+
+    def test_capture_all_bundle_mode(self) -> None:
+        phases = _resolve_capture_phases(["all"], [], use_bundle=True)
+        self.assertIn("package", phases)
+        self.assertNotIn("server_state", phases)
 
     def test_capture_subset(self) -> None:
         self.assertEqual(
@@ -96,7 +104,8 @@ class PhaseResolutionTests(unittest.TestCase):
             "state",
             "secrets",
             "checksums",
-            "package",
+            "server_state",
+            "package",        # legacy bundle mode
         }
         self.assertEqual(set(ALL_CAPTURE_PHASES), expected)
 
