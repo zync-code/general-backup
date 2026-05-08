@@ -1,8 +1,11 @@
-"""capture subcommand — full 14-phase capture pipeline.
+"""capture subcommand — full capture pipeline.
 
 Phases (in order):
   preflight, git-sync, inventory, packages, system, nginx, cron,
-  postgres, redis, pm2, state, secrets, checksums, package
+  postgres, redis, pm2, state, secrets, checksums, server_state
+
+Legacy bundle mode (--out):
+  Replace server_state with package to produce a local .tar.zst instead.
 """
 from __future__ import annotations
 
@@ -27,10 +30,11 @@ _PHASE_MODULE_MAP = {
     "postgres":   "postgres",
     "redis":      "redis",
     "pm2":        "pm2",
-    "state":      "state",
-    "secrets":    "secrets",
-    "checksums":  "checksums",
-    "package":    "package",
+    "state":        "state",
+    "secrets":      "secrets",
+    "checksums":    "checksums",
+    "server_state": "server_state",
+    "package":      "package",
 }
 
 
