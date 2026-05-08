@@ -38,18 +38,15 @@ def run(ctx: Context) -> None:
         warn(f"redis: SAVE failed: {result.stderr.strip()} — dump.rdb may be stale")
 
     # Copy dump.rdb (owned by redis user — read via sudo)
-    if _RDB_DEFAULT.exists():
-        result = subprocess.run(
-            ["sudo", "-u", "redis", "cat", str(_RDB_DEFAULT)],
-            capture_output=True,
-        )
-        if result.returncode == 0 and result.stdout:
-            (redis_dir / "dump.rdb").write_bytes(result.stdout)
-            info(f"redis: copied dump.rdb ({len(result.stdout):,} bytes)")
-        else:
-            warn(f"redis: could not read dump.rdb: {result.stderr.decode()[:100]}")
+    result = subprocess.run(
+        ["sudo", "-u", "redis", "cat", str(_RDB_DEFAULT)],
+        capture_output=True,
+    )
+    if result.returncode == 0 and result.stdout:
+        (redis_dir / "dump.rdb").write_bytes(result.stdout)
+        info(f"redis: copied dump.rdb ({len(result.stdout):,} bytes)")
     else:
-        warn(f"redis: {_RDB_DEFAULT} not found — redis data not captured")
+        warn(f"redis: could not read dump.rdb: {result.stderr.decode()[:100]}")
 
     # CONFIG GET * → diff vs defaults
     config_overrides = _get_config_overrides()
