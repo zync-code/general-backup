@@ -48,7 +48,7 @@ def run(ctx: Context) -> None:
 
 def _list_databases() -> List[str]:
     result = subprocess.run(
-        ["psql", "-U", "postgres", "-lqt", "--no-align"],
+        ["sudo", "-u", "postgres", "psql", "-lqt", "--no-align"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -65,7 +65,7 @@ def _list_databases() -> List[str]:
 def _dump_globals(output: Path) -> None:
     info("postgres: pg_dumpall --globals-only --no-role-passwords")
     result = subprocess.run(
-        ["pg_dumpall", "-U", "postgres", "--globals-only", "--no-role-passwords"],
+        ["sudo", "-u", "postgres", "pg_dumpall", "--globals-only", "--no-role-passwords"],
         capture_output=True,
     )
     if result.returncode != 0:
@@ -78,8 +78,8 @@ def _dump_db(db: str, output: Path) -> None:
     info(f"postgres: pg_dump {db!r}")
     result = subprocess.run(
         [
+            "sudo", "-u", "postgres",
             "pg_dump",
-            "-U", "postgres",
             "--format=custom",
             "--compress=9",
             "--file", str(output),
@@ -98,7 +98,7 @@ def _extract_role_passwords(output: Path) -> None:
     """Extract pw hashes from pg_authid (requires SUPERUSER)."""
     sql = "SELECT rolname, rolpassword FROM pg_authid WHERE rolpassword IS NOT NULL;"
     result = subprocess.run(
-        ["psql", "-U", "postgres", "-c", sql, "-t", "--no-align"],
+        ["sudo", "-u", "postgres", "psql", "-c", sql, "-t", "--no-align"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -123,6 +123,6 @@ def _extract_role_passwords(output: Path) -> None:
 
 def _pg_version() -> str:
     result = subprocess.run(
-        ["psql", "--version"], capture_output=True, text=True
+        ["sudo", "-u", "postgres", "psql", "--version"], capture_output=True, text=True
     )
     return result.stdout.strip() if result.returncode == 0 else "unknown"
