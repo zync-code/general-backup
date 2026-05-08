@@ -104,10 +104,12 @@ def run_cmd(
 
 
 def extract_tar(tar_path: Path, dest: Path) -> None:
-    """Extract a .tar.zst (or any supported format) to dest."""
+    """Extract a tar archive (including .tar.zst) to dest."""
+    import subprocess as _sp
     dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(tar_path, "r:*") as tf:
-        tf.extractall(dest, filter="data")
+    r = _sp.run(["tar", "-xf", str(tar_path), "-C", str(dest)], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise OSError(f"tar extract failed: {r.stderr.strip()}")
 
 
 def ensure_tmpfs_staging(name: str = "gb-secrets") -> Path:

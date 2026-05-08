@@ -58,11 +58,12 @@ def run(args, phases: List[str]) -> int:
     # Extract bundle once to a staging directory (persisted across phases)
     staging_dir = Path(tempfile.mkdtemp(prefix="gb-restore-"))
     info(f"restore: extracting bundle to {staging_dir}")
-    try:
-        with tarfile.open(bundle, "r:*") as tf:
-            tf.extractall(staging_dir, filter="data")
-    except Exception as exc:
-        error(f"failed to extract bundle: {exc}")
+    result = subprocess.run(
+        ["tar", "-xf", str(bundle), "-C", str(staging_dir)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        error(f"failed to extract bundle: {result.stderr.strip()}")
         shutil.rmtree(staging_dir, ignore_errors=True)
         return EXIT_INTEGRITY
 

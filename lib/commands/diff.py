@@ -35,11 +35,12 @@ def run(args) -> int:
         root = Path(tmpdir)
 
         info(f"diff: opening {bundle.name}")
-        try:
-            with tarfile.open(bundle, "r:*") as tf:
-                tf.extractall(root, filter="data")
-        except Exception as exc:
-            error(f"failed to open bundle: {exc}")
+        result = subprocess.run(
+            ["tar", "-xf", str(bundle), "-C", str(root)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            error(f"failed to open bundle: {result.stderr.strip()}")
             return 1
 
         tops = [p for p in root.iterdir() if p.is_dir()]

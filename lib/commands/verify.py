@@ -34,11 +34,12 @@ def run(args) -> int:
 
         # ── 1. Extract bundle ────────────────────────────────────────────────
         info(f"verify: opening {bundle.name}")
-        try:
-            with tarfile.open(bundle, "r:*") as tf:
-                tf.extractall(root, filter="data")
-        except Exception as exc:
-            error(f"failed to open/extract bundle: {exc}")
+        result = subprocess.run(
+            ["tar", "-xf", str(bundle), "-C", str(root)],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            error(f"failed to open/extract bundle: {result.stderr.strip()}")
             return 2
 
         # Find the top-level bundle directory (general-backup-<host>-<stamp>/)
