@@ -35,7 +35,8 @@ ALL_CAPTURE_PHASES = [
     "state",
     "secrets",
     "checksums",
-    "package",
+    "server_state",
+    "package",        # legacy: local .tar.zst bundle (use --out)
 ]
 
 ALL_RESTORE_PHASES = [
@@ -190,9 +191,17 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _resolve_capture_phases(include: List[str], exclude: List[str]) -> List[str]:
+_DEFAULT_CAPTURE_PHASES = [p for p in ALL_CAPTURE_PHASES if p != "package"]
+
+
+def _resolve_capture_phases(include: List[str], exclude: List[str], use_bundle: bool = False) -> List[str]:
     if "all" in include:
-        phases = list(ALL_CAPTURE_PHASES)
+        if use_bundle:
+            # Legacy mode: drop server_state, keep package
+            phases = [p for p in ALL_CAPTURE_PHASES if p != "server_state"]
+        else:
+            # Default: drop legacy package phase
+            phases = list(_DEFAULT_CAPTURE_PHASES)
     else:
         phases = [p for p in include if p in ALL_CAPTURE_PHASES]
     return [p for p in phases if p not in exclude]
@@ -212,7 +221,8 @@ def main(argv: Sequence[str]) -> int:
 
     if args.command == "capture":
         from .commands import capture as cmd
-        phases = _resolve_capture_phases(args.include, args.exclude)
+        use_bundle = bool(getattr(args, "out", None))
+        phases = _resolve_capture_phases(args.include, args.exclude, use_bundle=use_bundle)
         return cmd.run(args, phases)
 
     if args.command == "restore":
