@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import shutil
+import subprocess
 import tarfile
 import tempfile
 from pathlib import Path

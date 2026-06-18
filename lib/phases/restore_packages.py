@@ -13,10 +13,7 @@ def run(ctx: RestoreContext) -> None:
 
     info("restore/packages: applying dpkg --set-selections")
     try:
-        with open(selections, "rb") as f:
-            run_cmd(["dpkg", "--set-selections"], capture=False)
-        # Pipe the selections file into dpkg --set-selections
-        import subprocess, os
+        import subprocess
         with open(selections, "rb") as f:
             subprocess.run(
                 ["dpkg", "--set-selections"],
