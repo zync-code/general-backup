@@ -189,9 +189,54 @@ in-place to match.
 
 ### What's left
 1. Re-issue the `*.landlify.com` wildcard cert via DNS-01 (manual TXT record) if it's actually in use.
-2. GitHub Actions self-hosted runners (3x) — still need re-registration, not done yet.
-3. Decide whether the dormant nginx-deploy_type apps (moj-pausal, lekopis, hdbp, recs, dibly, landlify) need to be brought up via PM2/systemd on the new server, or were already decommissioned on the old one — investigate before assuming "fine to ignore".
+2. ~~GitHub Actions self-hosted runners (3x)~~ — DONE: re-registered via `gh api .../registration-token` + fresh runner download, all 3 online, old-server services stopped+disabled.
+3. Dormant nginx-deploy_type apps (moj-pausal, lekopis, hdbp, recs, dibly, landlify) — confirmed via `ss -tlnp` that **nothing listens on their upstream ports on the OLD server either**, and none have a `pm2_apps` entry in `projects.json`. Not a migration gap — they were never running as live services on the old server. `hdbp` has a real-sounding description ("Harare Digital Billing Platform") despite being dormant — worth a deliberate decision (not a migration task) on whether it should be deployed.
 4. Old server can stay as fallback for a few days, then decommission.
+
+## Security/config audit (2026-06-18) — things general-backup does NOT capture by default
+
+Asked explicitly "did we miss any security setup" after the main migration. Checked,
+on the OLD server: firewall (none — no ufw/iptables/nft rules, no fail2ban/clamav/
+rkhunter installed), sysctl.d (all stock Ubuntu hardening files, nothing custom),
+swap (none), logrotate (stock), monitoring agents (none), rsyslog/journald remote
+forwarding (none), VPN configs (none), root crontab (empty), pg_hba.conf and
+redis.conf bind/protected-mode (both stock defaults) — **all of these had nothing
+to migrate, new server already matches by virtue of being a fresh Ubuntu 24.04 +
+same package installs**.
+
+Two real gaps were found and fixed:
+
+1. **`bot` user's unrestricted sudo was silently dropped.** `/etc/sudoers` itself
+   (not `/etc/sudoers.d/`) had a hand-added line `bot ALL=(ALL) NOPASSWD: ALL` —
+   `general-backup` only ever captured `/etc/sudoers.d/*`, never custom lines in
+   the main file. Worse: even `/etc/sudoers.d/bot-nginx` (mode `r--r-----`
+   root:root) failed to capture because the `system` phase read files directly
+   instead of via `sudo`, and capture always runs as the unprivileged `bot` user
+   — it silently warned and skipped, and that warning was easy to miss in the
+   capture log. Manually fixed on `5vdb` (added `bot-nginx` and a new
+   `bot-full-sudo` sudoers.d file, `visudo -c` validated). Tool fixed: `system.py`
+   now reads `/etc/shadow` and `/etc/sudoers.d/*` via `sudo cat` with a
+   direct-read fallback, and additionally extracts non-stock "User privilege
+   specification" lines from the main `/etc/sudoers` into a new
+   `sudoers_main.delta` secret, which restore installs as a separate
+   `sudoers.d/99-restored-main-sudoers` file (validated with `visudo -c` before
+   being trusted — if invalid, it's discarded with a warning rather than
+   breaking sudo on the target).
+2. **Redis `CONFIG GET` parsing bug corrupted any config key with an empty
+   value.** The old capture filtered out blank lines before pairing up
+   key/value pairs, so `requirepass` (legitimately empty — no Redis password
+   on the old server) got the *next* key's value instead, recording
+   `{"requirepass": "activedefrag"}` in `config.json`. Restore would have
+   applied this — `CONFIG SET requirepass activedefrag` — locking every app
+   out of Redis with a password none of them know. It happened to not matter
+   here only because redis-server got restarted later in this session for an
+   unrelated reason, which reverted the runtime-only `CONFIG SET` back to
+   `redis.conf`'s real (passwordless) value. Fixed: stopped dropping blank
+   lines when splitting the `CONFIG GET *` output.
+
+**If you run another `capture` on the OLD server before decommissioning it,
+both fixes apply automatically — no manual steps needed for future
+migrations.**
 
 ## Phase 1 — Transfer bundle to NEW server
 
