@@ -2,12 +2,21 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
 from ..log import info, warn
 from .restore_base import RestoreContext, RestoreError
+
+
+def _su(user: str, *cmd: str) -> list:
+    # `pm2` daemonizes (double-fork + setsid); under `sudo -u` the detached
+    # daemon's later `spawn(node)` calls fail with EACCES on this host
+    # (likely a PAM/session artifact). `su -l` gives it a real login session
+    # and does not hit this — verified empirically against `sudo -u`.
+    return ["su", "-l", user, "-c", shlex.join(cmd)]
 
 
 def run(ctx: RestoreContext) -> None:
@@ -39,7 +48,7 @@ def run(ctx: RestoreContext) -> None:
     # pm2 resurrect as target user
     info(f"restore/pm2: running pm2 resurrect as {ctx.target_user!r}")
     result = subprocess.run(
-        ["sudo", "-u", ctx.target_user, "--", "pm2", "resurrect"],
+        _su(ctx.target_user, "pm2", "resurrect"),
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -52,7 +61,7 @@ def run(ctx: RestoreContext) -> None:
 
     # pm2 save
     subprocess.run(
-        ["sudo", "-u", ctx.target_user, "--", "pm2", "save"],
+        _su(ctx.target_user, "pm2", "save"),
         capture_output=True,
     )
 
@@ -64,7 +73,7 @@ def run(ctx: RestoreContext) -> None:
 
 def _verify_count(user: str, expected: int) -> None:
     result = subprocess.run(
-        ["sudo", "-u", user, "--", "pm2", "jlist"],
+        _su(user, "pm2", "jlist"),
         capture_output=True, text=True,
     )
     try:
@@ -84,7 +93,7 @@ def _verify_count(user: str, expected: int) -> None:
 
 def _configure_startup(user: str) -> None:
     result = subprocess.run(
-        ["sudo", "-u", user, "--", "pm2", "startup", "systemd", "-u", user, "--hp", f"/home/{user}"],
+        _su(user, "pm2", "startup", "systemd", "-u", user, "--hp", f"/home/{user}"),
         capture_output=True, text=True,
     )
     if result.returncode != 0:

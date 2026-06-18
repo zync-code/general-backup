@@ -44,8 +44,9 @@ def _check_pm2(ctx: RestoreContext, results: list) -> None:
     if expected is None:
         return
     try:
+        import shlex
         r = subprocess.run(
-            ["sudo", "-u", ctx.target_user, "--", "pm2", "jlist"],
+            ["su", "-l", ctx.target_user, "-c", shlex.join(["pm2", "jlist"])],
             capture_output=True, text=True, timeout=10,
         )
         actual = len(json.loads(r.stdout or "[]"))
