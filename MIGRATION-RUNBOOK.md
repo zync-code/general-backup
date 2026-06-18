@@ -304,6 +304,77 @@ parsing pm2's suggested-command text.
 - Remaining tool gaps for next time (not blocking this migration): pip package restore, `pm2 startup` automation.
 - The 40+ idle numbered tmux sessions on the old server are just empty leftover shells (no running processes inside) — nothing to migrate there.
 
+## Third audit pass (2026-06-18) — "check every shell script and everything that executes"
+
+Went looking specifically for executables/scripts living **outside** the paths
+`general-backup` actually touches (`~/.orchestrator`, `~/.claude`, `~/.config`,
+a fixed dotfile list, and `projects/*`). Found 4 more real gaps:
+
+1. **`/usr/local/bin/cld`** — a 2-line system-wide wrapper (`exec claude
+   --dangerously-skip-permissions "$@"`). Lives outside `$HOME` entirely, so
+   no phase ever had a chance to capture it. Copied by hand to the new server.
+   (`/usr/local/bin/cld~` is an editor backup file, not needed.) Checked the
+   rest of `/usr/local/bin`, `/usr/local/sbin`, `/opt`, `/etc/profile.d` —
+   everything else there is either a stock Ubuntu file or a symlink owned by
+   an installed package (pm2's own bin symlinks) that gets recreated by
+   installing the package, not a custom script.
+2. **`~/.npmrc`** (`prefix=/home/bot/.npm-global`) and **`~/.claude.json`**
+   (Claude Code's account/MCP config) are both bare files directly in
+   `$HOME`, not inside any of the directories `state.py` archives, and not on
+   its hardcoded dotfile list. `.claude.json` is the more serious one — it
+   contains **live API tokens** in `mcpServers.*.env`
+   (`LINEAR_API_KEY`, `GITHUB_PERSONAL_ACCESS_TOKEN`), so it cannot just be
+   added to the plaintext dotfile path. Fixed: `.npmrc` added to `state.py`'s
+   dotfile list (plaintext, no secrets); `.claude.json` now collected by
+   `secrets.py` and decrypted/installed by `restore_secrets_decrypt.py`
+   (mode 600), alongside the existing GH-token and SSH-key handling.
+3. **Two real GitHub-backed projects** (`orchestr-ai`, `restoran`) covered in
+   the prior pass turned out to have a wrinkle: `/home/bot/projects/orchestr-ai`
+   (the one registered/cloned) was a stale secondary dev clone. The actual
+   live checkout the PM2 ecosystem config (`~/.orchestrator/nginx/orchestr-ai-pm2.json`,
+   app `orchestr-ai-service`, port 3120 — present but **not currently running
+   in PM2 on the old server either**, so no live-service gap) and other
+   tooling reference is `/home/bot/orchestr-ai` (note: no `projects/` in the
+   path) — on branch `feature/new-modules`, with its own `.env` (real
+   secrets: Anthropic/OpenAI keys, a bearer API token) and a `.venv`. Neither
+   of those is captured by anything. Fixed for *this* migration: cloned
+   `orchestr-ai` fresh to `/home/bot/orchestr-ai` on the new server at the
+   right branch, copied `.env` by hand, recreated `.venv` from
+   `requirements.txt`, smoke-tested `start.sh` (loads all modules, listens on
+   3120, shut down again to match the old server's actual dormant state).
+   Also found and pushed one more uncommitted change here (a 1-file CSS fix,
+   no conflicts, fast-forwarded onto an origin commit that had landed in the
+   meantime) — separate from the `coder/monitor/research` conflict-laden
+   branch from the previous pass.
+4. **Leftover top-level directories under `$HOME`** not referenced by any
+   nginx vhost or registered project: `electron-todo-app` (305MB, almost
+   entirely a disposable `node_modules/electron` download, not a git repo),
+   `todo-app`, `public/` (static PRD html), `uploads/` (empty), `logs/`
+   (near-empty). Copied everything except `node_modules` over via tar+scp for
+   completeness, even though none of it is wired into anything live.
+
+### Also fixed in the tool this pass
+- `restore_pm2.py`'s `_configure_startup` ran `pm2 startup` via `su -l
+  <user>`, which only ever *prints* the root command needed instead of
+  registering it — confirmed this is exactly why `pm2-bot.service` was
+  missing after the automated restore in the first pass. Now runs directly
+  as root (restore already runs as root) instead of through `su`.
+- Added a `pip3 install --break-system-packages -r pip3-freeze.txt` step to
+  `restore_packages.py` (best-effort: detects packages pip reports it can't
+  touch — non-pypi names, Debian-RECORD-file conflicts like `urllib3`/`idna`
+  — drops just those and retries once, rather than failing the whole
+  restore). This is the actual fix for the telegram-bot crash-loop found in
+  the second pass; before this, *every* pip-dependent script anywhere on the
+  server would silently fail to start after a restore with no clear error
+  surfaced anywhere but the crashing process's own log.
+
+### Updated final answer
+Everything found in this pass has been applied to the new server by hand
+*and* fixed in the tool for next time. Nothing outstanding except the two
+items already known from pass two (the `backup/uncommitted-modules-*` branch
+needs a human merge decision; the `*.landlify.com` wildcard cert needs a
+manual DNS-01 TXT record if it's actually used).
+
 ## Phase 1 — Transfer bundle to NEW server
 
 ```bash
