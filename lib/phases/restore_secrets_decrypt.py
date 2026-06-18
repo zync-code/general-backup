@@ -163,6 +163,21 @@ def _install_shadow_sudoers(secrets_dir: Path) -> None:
             _sh.copy2(f, dest)
             dest.chmod(0o440)
 
+    # Custom lines from the old server's main /etc/sudoers (e.g. a NOPASSWD
+    # grant for the deploy user) — installed as their own sudoers.d file and
+    # validated with visudo before being trusted.
+    main_extras_src = system_dir / "sudoers_main.delta"
+    if main_extras_src.exists():
+        dest = Path("/etc/sudoers.d/99-restored-main-sudoers")
+        dest.write_text(main_extras_src.read_text(encoding="utf-8"), encoding="utf-8")
+        dest.chmod(0o440)
+        check = subprocess.run(["visudo", "-c", "-f", str(dest)], capture_output=True, text=True)
+        if check.returncode != 0:
+            dest.unlink()
+            warn(f"restore/secrets-decrypt: sudoers_main.delta failed visudo check, not installed: {check.stderr.strip()}")
+        else:
+            info("restore/secrets-decrypt: installed custom main-sudoers lines as sudoers.d/99-restored-main-sudoers")
+
 
 def _load_pg_passwords(secrets_dir: Path, ctx: RestoreContext) -> None:
     roles_path = secrets_dir / "postgres" / "roles.json"
