@@ -29,6 +29,20 @@ cd ~/projects/general-backup
 
 Output: `/home/bot/backups/general-backup-5t3i.c.time4vps.cloud-<timestamp>.tar.zst`
 
+### Status (2026-06-18, actual run)
+- Bundle captured: `/home/bot/backups/general-backup-5t3i-20260618T135716.tar.zst` (9.0 MB, verified ok)
+- Age private key: `~/.config/age/key.txt` — **download this off-server before anything else**, public key is `age1gkgjszk5cgsjm03534rm9t5g4lg4qapjrkajtxjp6w33f5qjdaas5v0jg7`
+- Fixed during capture: `dev-pulse` was behind remote (fast-forwarded), `procvat` had a bad historical commit with `.next/`, `node_modules/`, and a leaked `.env.local` committed to git — rewrote it to a clean commit + added `.gitignore`, force-free push succeeded.
+- **`nikola` project: GitHub repo `zync-code/nikola` does not exist** (never created or deleted). Git-sync for this project will keep failing. Per decision: **do not auto-create the repo** — restore this project's source manually:
+  ```bash
+  # On OLD server, before decommissioning:
+  tar czf /home/bot/backups/nikola-source.tar.gz -C /home/bot/projects nikola
+  scp /home/bot/backups/nikola-source.tar.gz bot@<NEW_SERVER_IP>:/home/bot/projects/
+  # On NEW server:
+  cd /home/bot/projects && tar xzf nikola-source.tar.gz
+  ```
+  Everything else for `nikola` (postgres db if any, nginx vhost, pm2 entry, env file) is still inside the main bundle — only the git-clone step in the automated restore will skip/fail for this one project.
+
 ## Phase 1 — Transfer bundle to NEW server
 
 ```bash
