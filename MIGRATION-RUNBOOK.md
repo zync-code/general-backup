@@ -420,6 +420,61 @@ Asked to double-check environment variables and to push every
    manual fix this time — but the next `capture` run on any server will
    catch this pattern automatically.
 
+## Fifth audit pass (2026-06-18) — directory-vs-registration cross-check
+
+Did a `set(os.listdir(projects/)) - set(projects.json.keys())` diff in both
+directions. This is the check that should have been run *first* — it found
+the biggest remaining gap in one shot:
+
+**5 more directories existed on disk with zero backup coverage**, because
+`projects.json` is the only thing `git-sync`/`projects-clone` ever look at —
+anything not registered there is invisible to every phase, no matter how
+real or how much `.env`-secret content it has:
+
+- `see` → real repo (`zync-code/saa-website.git`), clean, in sync with
+  origin. Has a real nginx vhost + a freshly issued SSL cert from earlier in
+  this session — was already being treated as a live, almost-deployed
+  domain without its source ever having a backup path.
+- `recs` → real repo (`zync-code/recs.git`), clean. Note: its `.git/config`
+  had the GitHub PAT embedded directly in the remote URL
+  (`https://zync-code:ghp_...@github.com/...`) — cloned fresh on the new
+  server with the plain URL instead of carrying that forward.
+- `ssl-sentinel` → real repo (`zync-code/ssl-sentinel.git`), clean.
+- `command-center` → **no git repo at all**, plus a `.jwt-secret` file.
+  Same treatment as `nexus` below: `git init`, `.gitignore` excluding
+  `node_modules/` and `.jwt-secret`, created `zync-code/command-center`
+  (private) on GitHub, pushed, cloned fresh on the new server,
+  `.jwt-secret` copied separately (chmod 600).
+- `nexus` → **no git repo at all** (a Three.js/React-Three-Fiber +
+  FastAPI demo). Found via a different signal: total `projects/` size
+  excluding all build-artifact dirs was 50MB on the old server vs 31MB on
+  the new one — chasing that gap down (not just trusting "no untracked
+  files" on already-registered repos) is what surfaced it. Same treatment:
+  `git init` + `.gitignore` + new private GitHub repo
+  `zync-code/nexus` + push + fresh clone on new server.
+
+All four of `see`/`recs`/`ssl-sentinel`/`command-center`'s real `.env*`
+files (the `.env` collection in `secrets.py` only ever looks at *registered*
+projects' `project_dir`, so these were never captured either) were copied
+over by hand and chmod 600'd. All 5 are now in `projects.json` (30 projects
+total).
+
+**Also resolved while cross-checking**: a stale `bar7` (lowercase) entry in
+`projects.json` pointed at `github_repo: zync-code/bar7.git` and
+`project_dir: /home/bot/projects/bar7`, neither of which existed — `gh api
+repos/zync-code/bar7` resolves (via GitHub's repo-rename redirect) to
+`restoran`, which was already migrated as its own registered project in an
+earlier pass. Removed the dangling duplicate entry rather than leave a
+registration that points nowhere.
+
+**Tool implication, not yet fixed**: there is currently no automated check
+that `projects/*` on disk matches `projects.json` — a project can be cloned
+or scaffolded locally and simply never get registered, and nothing in
+`general-backup` will ever notice or warn. Worth adding a `general-backup
+diff`-style check (the CLI already has a `diff` subcommand per the README,
+worth confirming it covers this) or a `preflight` warning for
+unregistered directories under each known `project_dir` parent.
+
 ### `.cursor` / additional editor configs
 Checked: no `~/.cursor` directory exists on this server (Cursor editor was
 never used here) — nothing to migrate. `~/.claude` was already fully covered
