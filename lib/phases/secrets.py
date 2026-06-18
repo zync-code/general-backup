@@ -8,6 +8,9 @@ Sources collected (into a tar archive, then piped through age):
   - /etc/shadow lines for non-system users (from staging-secrets)
   - /etc/sudoers.d/* (from staging-secrets)
   - ~/.orchestrator/config/settings.json
+  - ~/.claude.json (Claude Code account/MCP config — contains live API tokens
+    in mcpServers[*].env, e.g. LINEAR_API_KEY/GITHUB_PERSONAL_ACCESS_TOKEN, so
+    this must never land in the plaintext part of the bundle)
 """
 from __future__ import annotations
 
@@ -38,6 +41,7 @@ def run(ctx: Context) -> None:
         _collect_ssh(home, secrets_src)
         _collect_gh_config(home, secrets_src)
         _collect_orchestrator_settings(home, secrets_src)
+        _collect_claude_json(home, secrets_src)
         _collect_from_secrets_staging(ctx.secrets_staging, secrets_src)
 
         _encrypt(secrets_src, ctx.staging / "secrets.age", age_recipient)
@@ -121,6 +125,15 @@ def _collect_orchestrator_settings(home: Path, dest: Path) -> None:
     import shutil
     shutil.copy2(settings, settings_dest)
     info("secrets: collected orchestrator settings.json")
+
+
+def _collect_claude_json(home: Path, dest: Path) -> None:
+    src = home / ".claude.json"
+    if not src.exists():
+        return
+    import shutil
+    shutil.copy2(src, dest / "claude.json")
+    info("secrets: collected ~/.claude.json")
 
 
 def _collect_from_secrets_staging(staging: Path, dest: Path) -> None:

@@ -99,7 +99,7 @@ def _archive_config(home: Path, state_dir: Path) -> None:
 
 
 def _archive_dotfiles(home: Path, state_dir: Path) -> None:
-    dotfiles = [".bashrc", ".profile", ".gitconfig", ".bash_profile", ".bash_aliases"]
+    dotfiles = [".bashrc", ".profile", ".gitconfig", ".bash_profile", ".bash_aliases", ".npmrc"]
     present = [home / f for f in dotfiles if (home / f).exists()]
     if not present:
         return

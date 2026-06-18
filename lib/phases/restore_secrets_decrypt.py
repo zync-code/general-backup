@@ -78,6 +78,14 @@ def run(ctx: RestoreContext) -> None:
     # Install GitHub hosts.yml
     _install_gh_hosts(secrets_dir, home)
 
+    # Restore ~/.claude.json (Claude Code account/MCP config with live tokens)
+    claude_json_src = secrets_dir / "claude.json"
+    if claude_json_src.exists():
+        dest = home / ".claude.json"
+        shutil.copy2(claude_json_src, dest)
+        dest.chmod(0o600)
+        info("restore/secrets-decrypt: installed ~/.claude.json")
+
     # Install project env files
     _install_env_files(secrets_dir, ctx)
 

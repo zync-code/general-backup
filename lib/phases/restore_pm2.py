@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -92,19 +93,18 @@ def _verify_count(user: str, expected: int) -> None:
 
 
 def _configure_startup(user: str) -> None:
+    # `pm2 startup` writes a systemd unit file — it needs to run as root to
+    # actually register it (run as the target user via `su`/`sudo -u`, it
+    # just prints the equivalent root command and exits 0, registering
+    # nothing). restore already runs as root, so call it directly here.
     result = subprocess.run(
-        _su(user, "pm2", "startup", "systemd", "-u", user, "--hp", f"/home/{user}"),
+        ["env", f"PATH={os.environ.get('PATH', '')}", "pm2", "startup", "systemd",
+         "-u", user, "--hp", f"/home/{user}"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         warn(f"restore/pm2: startup config warning: {result.stderr[:200]}")
         return
-
-    # pm2 startup prints a 'sudo ...' command to run; execute it
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("sudo env"):
-            subprocess.run(line, shell=True, capture_output=True)
-            break
+    info("restore/pm2: systemd startup configured")
 
     info("restore/pm2: systemd startup configured")
