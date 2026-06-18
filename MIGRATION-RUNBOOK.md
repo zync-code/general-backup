@@ -475,6 +475,21 @@ diff`-style check (the CLI already has a `diff` subcommand per the README,
 worth confirming it covers this) or a `preflight` warning for
 unregistered directories under each known `project_dir` parent.
 
+## Sixth finding (2026-06-18) — `claude` CLI missing for the operator user
+
+User noticed `claude`/`cld` didn't work on the new server. Root cause:
+`restore_bootstrap.py` runs `bootstrap.sh` as root (restore always runs as
+root), and the claude-code installer puts the binary in
+`$HOME/.local/bin` of whoever invokes it — so it landed in
+`/root/.local/bin/claude`, not `/home/bot/.local/bin/claude`. The bootstrap
+log even *looked* successful ("✅ Installation complete!") because it was
+genuinely successful — just for the wrong user. `bot` (the actual operator
+account, and what `/usr/local/bin/cld` execs into) had no `claude` at all.
+Fixed by hand (`sudo -u bot -H -- bash -c 'curl -fsSL https://claude.ai/install.sh | bash'`).
+Fixed in the tool: `restore_bootstrap.py` now passes `GB_TARGET_USER` through
+to `bootstrap.sh`, which installs claude-code via `sudo -u "$GB_TARGET_USER"`
+when that differs from whoever is running the script.
+
 ### `.cursor` / additional editor configs
 Checked: no `~/.cursor` directory exists on this server (Cursor editor was
 never used here) — nothing to migrate. `~/.claude` was already fully covered
