@@ -238,6 +238,72 @@ Two real gaps were found and fixed:
 both fixes apply automatically — no manual steps needed for future
 migrations.**
 
+## Second audit pass (2026-06-18) — "is it safe to retire the old server?"
+
+Asked explicitly before decommissioning. Found **3 more real gaps**, all fixed:
+
+### 1. Two real GitHub-backed projects were never in `projects.json` at all
+`orchestr-ai` (the orchestrator's own source code — yes, the tool managing
+this whole migration) and `restoran` had valid GitHub remotes but were never
+registered, so `git-sync`/`projects-clone` never touched them — **they did
+not exist on the new server at all** until this pass.
+- `orchestr-ai` had 6 dirty files: substantial uncommitted work (new
+  `coder`/`monitor`/`research` module scaffolding + a dashboard PRD, ~1140
+  lines). Pushing hit merge conflicts against ~38 commits of unrelated work
+  already on `origin/main` (including an overlapping PRD page) — **did not
+  attempt to auto-resolve conflicting source code**. Instead pushed the
+  uncommitted work to a new branch,
+  `backup/uncommitted-modules-pre-migration-20260618`, so nothing is lost;
+  reconciling it with main is a manual decision for whoever owns that work.
+- Both repos cloned fresh from `origin/main` onto the new server.
+- `restoran/apps/web/.env.local` (gitignored, not in any commit) copied over manually.
+- Both added to `projects.json` (now 26 registered projects) on both servers
+  so future captures cover them.
+
+### 2. Telegram bot + watchdog were never running on the new server
+`~/.bashrc` (already restored via dotfiles) auto-starts two tmux sessions on
+every login — `telegram-bot` (long-polls the Telegram Bot API) and
+`bot-watchdog` (restarts `telegram-bot` if it dies, checked every 30s). They
+auto-started the moment the first `su -l bot` command ran during this
+session — but `telegram_bot.py` crashed immediately every single time
+(`ModuleNotFoundError: No module named 'telegram'`) and the watchdog
+silently retried forever (the log showed ~1.5 hours of restart attempts,
+every 30s, with no visible error since the watchdog itself doesn't surface
+the crash reason).
+
+**Root cause: `restore_packages.py` only restores apt packages —
+pip-installed Python dependencies (captured in `packages/pip3-freeze.txt`,
+123 packages) are never reinstalled on restore.** This is a generic gap, not
+specific to the telegram bot — anything relying on a pip package would have
+the same silent failure mode. Worked around manually this time:
+`pip3 install --break-system-packages -r pip3-freeze.txt` (excluding 3 lines
+that conflict with Debian-shipped packages: `gyp` — not a real installable
+package, `urllib3`/`idna` — RECORD-file conflicts with apt's python3-urllib3
+etc., harmless to skip, apt's version is close enough). Killed the old
+server's `telegram-bot`/`bot-watchdog` sessions first (Telegram's
+`getUpdates` long-poll is exclusive per bot token — running two pollers
+causes HTTP 409 Conflict), then restarted them clean on the new server.
+**TODO for the tool**: add a pip-restore phase mirroring the apt one.
+
+### 3. PM2 boot persistence (`pm2 startup`) silently failed during the automated restore
+`restore_pm2.py`'s `_configure_startup` ran `pm2 startup` via `su -l` and the
+command printed instructions instead of registering anything (needs to run
+the *suggested* `sudo env PATH=... pm2 startup ...` line as root, not as the
+target user) — the systemd unit `pm2-bot.service` was never created. Means
+a reboot would have lost all 7 PM2 apps. Fixed manually: ran
+`pm2 startup systemd -u bot --hp /home/bot` directly as root, then `pm2 save`.
+Confirmed `pm2-bot.service` now `enabled`. **Not yet fixed in the tool** —
+`restore_pm2.py`'s `_configure_startup` needs the same kind of fix `_su()`
+got, or to directly run the systemd-registration command as root instead of
+parsing pm2's suggested-command text.
+
+### Final answer: yes, safe to retire — with these notes
+- All Postgres/Redis/PM2/projects/nginx/SSL/cron/runners state confirmed present and correct.
+- `orchestr-ai`'s uncommitted work is safe on a GitHub branch, not lost, but **not yet merged** — someone needs to reconcile it with main.
+- Telegram bot + watchdog confirmed running cleanly on the new server only (old server's instance killed to avoid the 409 conflict).
+- Remaining tool gaps for next time (not blocking this migration): pip package restore, `pm2 startup` automation.
+- The 40+ idle numbered tmux sessions on the old server are just empty leftover shells (no running processes inside) — nothing to migrate there.
+
 ## Phase 1 — Transfer bundle to NEW server
 
 ```bash
