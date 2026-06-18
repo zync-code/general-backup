@@ -29,9 +29,12 @@ def run(ctx: RestoreContext) -> None:
     dump_dest = pm2_home / "dump.pm2"
     shutil.copy2(dump_src, dump_dest)
     try:
-        shutil.chown(dump_dest, user=ctx.target_user, group=ctx.target_user)
-    except Exception:
-        pass
+        subprocess.run(
+            ["chown", "-R", f"{ctx.target_user}:{ctx.target_user}", str(pm2_home)],
+            check=True, capture_output=True,
+        )
+    except Exception as exc:
+        warn(f"restore/pm2: chown of {pm2_home} failed: {exc}")
 
     # pm2 resurrect as target user
     info(f"restore/pm2: running pm2 resurrect as {ctx.target_user!r}")

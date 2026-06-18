@@ -108,7 +108,8 @@ def _check_projects(ctx: RestoreContext, results: list) -> None:
             continue
         try:
             r = subprocess.run(
-                ["git", "-C", str(proj_dir), "rev-parse", "HEAD"],
+                ["sudo", "-u", ctx.target_user, "-H", "--",
+                 "git", "-C", str(proj_dir), "rev-parse", "HEAD"],
                 capture_output=True, text=True,
             )
             actual = r.stdout.strip()
