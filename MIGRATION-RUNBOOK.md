@@ -117,8 +117,81 @@ expects at runtime but doesn't commit (e.g. `girls-x-venues/uploads`).
 Final state: all 7 PM2 processes online and stable (gxv-admin/api/venue/web,
 qa-tool-web/worker/hocuspocus), all 14 Postgres databases restored, Redis
 restored, all 23 git-backed projects at the correct (verified-on-remote) SHA.
-Remaining manual step before cutover: nginx -t still fails until certbot runs
-for each domain (expected — see Phase 3).
+
+## Phase 3 — actually executed (2026-06-18)
+
+### DNS cutover
+All 10 A records + 1 AAAA (lekopis.com) switched at the registrar to
+94.176.233.104 / 2a02:7b40:5eb0:e968::1. Propagated within ~10 min (TTL 600s).
+Verified every subdomain referenced by existing certs (www.*, tax.*,
+hdbp-admin/api/ussd.*, see-admin/api.*) had already followed (registrar-level
+wildcard/zone behavior) — no extra records needed beyond the 10 documented.
+
+### Certbot — chicken-and-egg problem hit and resolved
+`certbot --nginx` cannot run on a fresh box here: the restored nginx vhosts
+already reference `/etc/letsencrypt/live/<domain>/...` and
+`options-ssl-nginx.conf` paths (captured from the old server), so `nginx -t`
+fails before certbot's nginx plugin can even attempt the HTTP-01 challenge —
+and nginx won't start to serve the challenge either. Fix used:
+1. Copy `/etc/letsencrypt/options-ssl-nginx.conf` and `ssl-dhparams.pem`
+   (generic, no secrets) from the old server first.
+2. Stop nginx (frees port 80), then for each cert group use
+   **`certbot certonly --standalone`** (runs its own temp listener, doesn't
+   need nginx config to be valid):
+   ```bash
+   certbot certonly --standalone --non-interactive --agree-tos -m <email> \
+     -d dibly.me -d www.dibly.me
+   # ... repeated per group, SANs matched exactly to the old certs (checked
+   # via: openssl x509 -in /etc/letsencrypt/live/<name>/cert.pem -noout -text)
+   ```
+3. Once all `live/` dirs have real certs, `nginx -t` passes and
+   `systemctl start nginx` works normally.
+
+Cert groups issued (10, all expire 2026-09-16): dibly.me+www, landlify.com+www,
+lekopis.com+www, mojpausal.com+www, viewermd.com+www, hdbp.thinkn.cloud+admin+api+ussd,
+hdbp-docs.thinkn.cloud, recs.thinkn.cloud+tax.thinkn.cloud,
+see.thinkn.cloud+admin+api, recs.db.delivery+tax.db.delivery.
+
+**Not issued — needs manual DNS-01**: `landlify.com-0001` was a **wildcard**
+(`*.landlify.com`) cert on the old server. Wildcards require a DNS-01 TXT
+challenge, which can't be automated without DNS provider API access (this
+registrar is managed by hand). Workaround applied so nginx could start: the
+`~^.+\.landlify\.com$` server block's `ssl_certificate`/`ssl_certificate_key`
+in `/etc/nginx/sites-available/landlify.com` were repointed to the regular
+`landlify.com` cert. This means actual `*.landlify.com` subdomains (if any are
+used) will show a cert mismatch warning until the wildcard is reissued
+properly: `certbot certonly --manual --preferred-challenges dns -d '*.landlify.com' -d landlify.com`
+(walks through adding a `_acme-challenge.landlify.com` TXT record by hand).
+
+**`bootstrap.sh` gap found+fixed**: `certbot`/`python3-certbot-nginx` were
+never actually installed (they were in the captured apt-selections list, but
+`dpkg --set-selections` + `apt-get dselect-upgrade` didn't pull them in
+practice). Added both directly to `bootstrap.sh`'s `APT_PACKAGES`.
+
+**Default/catch-all vhost** (`sites-available/main`, `server_name
+5t3i.c.time4vps.cloud 62.77.155.227 _`) referenced the *old* hostname's own
+cert. Got a fresh cert for the new hostname (`5vdb.c.time4vps.cloud`, already
+resolvable) and updated the vhost's `server_name`/`ssl_certificate`/IP
+in-place to match.
+
+### Post-cutover verification
+`nginx -t` passes, nginx running. Checked all 10 domains over HTTPS:
+- `viewermd.com` → 200 (working)
+- `dibly.me`, `landlify.com`, `lekopis.com`, `mojpausal.com`,
+  `hdbp.thinkn.cloud`, `hdbp-docs.thinkn.cloud`, `recs.thinkn.cloud`,
+  `see.thinkn.cloud`, `recs.db.delivery` → 502
+  **Verified this is pre-existing, not a migration regression**: same exact
+  502 reproduced against the OLD server's IP for every one of these domains
+  (`curl --resolve <domain>:443:62.77.155.227 ...`). These apps simply aren't
+  running as services on either server (not nginx-deploy_type apps backed by
+  a live process — `recs.db.delivery` specifically has no nginx server block
+  at all on either server, just an orphaned unused certificate).
+
+### What's left
+1. Re-issue the `*.landlify.com` wildcard cert via DNS-01 (manual TXT record) if it's actually in use.
+2. GitHub Actions self-hosted runners (3x) — still need re-registration, not done yet.
+3. Decide whether the dormant nginx-deploy_type apps (moj-pausal, lekopis, hdbp, recs, dibly, landlify) need to be brought up via PM2/systemd on the new server, or were already decommissioned on the old one — investigate before assuming "fine to ignore".
+4. Old server can stay as fallback for a few days, then decommission.
 
 ## Phase 1 — Transfer bundle to NEW server
 
