@@ -72,6 +72,7 @@ APT_PACKAGES=(
     python3 python3-venv python3-pip
     ca-certificates gnupg lsb-release
     tmux sudo
+    certbot python3-certbot-nginx
 )
 
 # GitHub CLI (needed as git credential helper for https clones)
