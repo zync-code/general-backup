@@ -53,7 +53,46 @@ def run(ctx: Context) -> None:
     else:
         info(f"preflight: found {project_count} project(s) in projects.json")
 
+    _warn_unregistered_dirs(projects_json)
+
     if errors:
         raise PhaseError("preflight failed:\n" + "\n".join(f"  • {e}" for e in errors))
 
     info("preflight: all checks passed")
+
+
+def _warn_unregistered_dirs(projects_json: dict) -> None:
+    """Warn about subdirectories under each registered project_dir's parent
+    that aren't themselves registered — these are invisible to git-sync,
+    the .env collector, and everything else, no matter how real they are.
+    Found the hard way: real projects with real secrets sat unregistered
+    and unbacked-up for months (see, recs, ssl-sentinel, command-center,
+    nexus) until a manual disk-vs-registration diff caught it.
+    """
+    projects = projects_json.get("projects", {})
+    registered_dirs = {
+        Path(p["project_dir"]).name
+        for p in projects.values()
+        if p.get("project_dir")
+    }
+    parents = {
+        Path(p["project_dir"]).parent
+        for p in projects.values()
+        if p.get("project_dir")
+    }
+
+    unregistered = []
+    for parent in parents:
+        if not parent.is_dir():
+            continue
+        for entry in parent.iterdir():
+            if entry.is_dir() and entry.name not in registered_dirs and not entry.name.startswith("."):
+                unregistered.append(str(entry))
+
+    if unregistered:
+        warn(
+            f"preflight: {len(unregistered)} director(ies) under project parent path(s) "
+            "are NOT registered in projects.json — they will be skipped entirely "
+            "(no git-sync, no .env capture):\n"
+            + "\n".join(f"    {d}" for d in sorted(unregistered))
+        )
