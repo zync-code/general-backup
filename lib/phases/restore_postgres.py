@@ -63,7 +63,7 @@ def _ensure_pg_running() -> None:
 
 def _psql_file(sql_path: Path) -> None:
     result = subprocess.run(
-        ["psql", "-U", "postgres", "-f", str(sql_path)],
+        ["sudo", "-u", "postgres", "psql", "-f", str(sql_path)],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -72,7 +72,7 @@ def _psql_file(sql_path: Path) -> None:
 
 def _psql_cmd(sql: str) -> None:
     result = subprocess.run(
-        ["psql", "-U", "postgres", "-c", sql],
+        ["sudo", "-u", "postgres", "psql", "-c", sql],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -82,7 +82,7 @@ def _psql_cmd(sql: str) -> None:
 def _restore_db(db_name: str, dump_path: Path) -> None:
     # Create database if it doesn't exist
     result = subprocess.run(
-        ["psql", "-U", "postgres", "-lqt"],
+        ["sudo", "-u", "postgres", "psql", "-lqt"],
         capture_output=True, text=True,
     )
     existing_dbs = {
@@ -94,7 +94,7 @@ def _restore_db(db_name: str, dump_path: Path) -> None:
     if db_name not in existing_dbs:
         info(f"restore/postgres: creating database {db_name!r}")
         result = subprocess.run(
-            ["createdb", "-U", "postgres", db_name],
+            ["sudo", "-u", "postgres", "createdb", db_name],
             capture_output=True, text=True,
         )
         if result.returncode != 0:
@@ -106,11 +106,11 @@ def _restore_db(db_name: str, dump_path: Path) -> None:
     info(f"restore/postgres: pg_restore {db_name!r}")
     result = subprocess.run(
         [
+            "sudo", "-u", "postgres",
             "pg_restore",
             "--format=custom",
             "--no-owner",
             "--no-acl",
-            "-U", "postgres",
             "-d", db_name,
             str(dump_path),
         ],

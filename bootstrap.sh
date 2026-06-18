@@ -74,6 +74,20 @@ APT_PACKAGES=(
     tmux sudo
 )
 
+# GitHub CLI (needed as git credential helper for https clones)
+if dpkg -l "gh" &>/dev/null; then
+    green "gh already installed"
+else
+    yellow "apt: adding GitHub CLI repository"
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+        https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list
+    apt-get update -q
+    APT_PACKAGES+=(gh)
+fi
+
 # PostgreSQL 16 (from PostgreSQL apt repository if needed)
 if dpkg -l "postgresql-16" &>/dev/null; then
     green "postgresql-16 already installed"

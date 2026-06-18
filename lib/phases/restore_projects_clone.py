@@ -46,6 +46,17 @@ def run(ctx: RestoreContext) -> None:
         f"project(s) ok, {len(degraded)} degraded"
     )
 
+    # secrets-decrypt (.ssh, .config/gh, env files) and this phase's clones all
+    # ran after state-extract's chown, so re-chown the whole home to fix ownership.
+    home = ctx.target_home()
+    try:
+        subprocess.run(
+            ["chown", "-R", f"{ctx.target_user}:{ctx.target_user}", str(home)],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        warn(f"restore/projects-clone: chown failed: {exc}")
+
 
 def _clone_or_fetch(proj_dir: Path, git_url: str, sha: str) -> None:
     if (proj_dir / ".git").exists():

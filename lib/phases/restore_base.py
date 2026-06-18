@@ -103,11 +103,18 @@ def run_cmd(
     )
 
 
-def extract_tar(tar_path: Path, dest: Path) -> None:
-    """Extract a tar archive (including .tar.zst) to dest."""
+def extract_tar(tar_path: Path, dest: Path, strip_components: int = 1) -> None:
+    """Extract a tar archive (including .tar.zst) to dest.
+
+    Capture always wraps archive contents in a single top-level directory
+    (see state._tar_zstd), so the default strips that wrapper on extract.
+    """
     import subprocess as _sp
     dest.mkdir(parents=True, exist_ok=True)
-    r = _sp.run(["tar", "-xf", str(tar_path), "-C", str(dest)], capture_output=True, text=True)
+    cmd = ["tar", "-xf", str(tar_path), "-C", str(dest)]
+    if strip_components:
+        cmd += [f"--strip-components={strip_components}"]
+    r = _sp.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise OSError(f"tar extract failed: {r.stderr.strip()}")
 

@@ -78,7 +78,7 @@ def _check_postgres(ctx: RestoreContext, results: list) -> None:
         return
     try:
         r = subprocess.run(
-            ["psql", "-U", "postgres", "-lqt"],
+            ["sudo", "-u", "postgres", "psql", "-lqt"],
             capture_output=True, text=True, timeout=10,
         )
         live_dbs = {
