@@ -74,6 +74,19 @@ def run(ctx: Context) -> None:
             warn(f"git-sync: [{name}] push failed: {result.stderr[:200]}")
 
         sha = _current_sha(proj_dir)
+
+        # A failed (or rejected) push means HEAD may not be reachable on the
+        # remote. Recording it anyway would bake an unrestoreable SHA into
+        # the manifest, so verify it's actually present on origin/<branch>
+        # before trusting it.
+        if not _sha_on_remote(proj_dir, sha, branch):
+            dirty_errors.append(
+                f"{name}: local HEAD {sha[:8]} is not reachable on origin/{branch} "
+                "(diverged or push rejected) — resolve manually (rebase/merge or "
+                "reset to origin) and re-run capture"
+            )
+            continue
+
         info(f"git-sync: [{name}] @ {sha[:8]} on {branch}")
 
         synced.append(Project(
@@ -133,3 +146,9 @@ def _current_branch(proj_dir: Path) -> str:
 def _current_sha(proj_dir: Path) -> str:
     result = _git(proj_dir, ["rev-parse", "HEAD"])
     return result.stdout.strip()
+
+
+def _sha_on_remote(proj_dir: Path, sha: str, branch: str) -> bool:
+    _git(proj_dir, ["fetch", "--quiet", "origin", branch])
+    result = _git(proj_dir, ["merge-base", "--is-ancestor", sha, f"origin/{branch}"])
+    return result.returncode == 0

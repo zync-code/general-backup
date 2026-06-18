@@ -49,9 +49,13 @@ def run(ctx: RestoreContext) -> None:
     # Test and reload
     result = subprocess.run(["nginx", "-t"], capture_output=True, text=True)
     if result.returncode != 0:
+        # SSL certs are intentionally excluded from the bundle (obtained via
+        # certbot post-DNS-cutover) — a failing config at this point is
+        # expected, not fatal. exit_code=3 lets the rest of restore proceed.
         raise RestoreError(
             f"nginx -t failed after restore:\n{result.stderr.strip()}\n"
-            "Check for missing SSL certificates (obtain with certbot)"
+            "Check for missing SSL certificates (obtain with certbot)",
+            exit_code=3,
         )
 
     info("restore/nginx: nginx -t ok — reloading")
