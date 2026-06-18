@@ -153,17 +153,39 @@ else
 fi
 
 # ── Step 5: claude-code CLI ───────────────────────────────────────────────────
+# The installer puts the binary in $HOME/.local/bin of whoever runs it. During
+# `restore`, this script always runs as root — installing there is useless,
+# since the actual operator account (GB_TARGET_USER, e.g. "bot") is who runs
+# `claude`/`cld` day to day. Install for that user specifically when set and
+# different from the current user.
 
-if command -v claude &>/dev/null; then
-    green "claude-code CLI already installed ($(claude --version 2>/dev/null || echo '?'))"
+_CLAUDE_TARGET_USER="${GB_TARGET_USER:-$(whoami)}"
+
+_claude_installed_for_target() {
+    if [[ "${_CLAUDE_TARGET_USER}" == "$(whoami)" ]]; then
+        command -v claude &>/dev/null
+    else
+        sudo -u "${_CLAUDE_TARGET_USER}" -H -- test -x "/home/${_CLAUDE_TARGET_USER}/.local/bin/claude"
+    fi
+}
+
+if _claude_installed_for_target; then
+    green "claude-code CLI already installed for ${_CLAUDE_TARGET_USER}"
 else
-    yellow "claude-code: installing via official installer"
-    curl -fsSL https://claude.ai/install.sh | bash || {
-        yellow "claude-code: primary installer failed — trying npm"
-        npm install -g @anthropic-ai/claude-code --quiet || true
-    }
-    if command -v claude &>/dev/null; then
-        green "claude-code installed"
+    yellow "claude-code: installing via official installer (for ${_CLAUDE_TARGET_USER})"
+    if [[ "${_CLAUDE_TARGET_USER}" == "$(whoami)" ]]; then
+        curl -fsSL https://claude.ai/install.sh | bash || {
+            yellow "claude-code: primary installer failed — trying npm"
+            npm install -g @anthropic-ai/claude-code --quiet || true
+        }
+    else
+        sudo -u "${_CLAUDE_TARGET_USER}" -H -- bash -c 'curl -fsSL https://claude.ai/install.sh | bash' || {
+            yellow "claude-code: primary installer failed — trying npm"
+            npm install -g @anthropic-ai/claude-code --quiet || true
+        }
+    fi
+    if _claude_installed_for_target; then
+        green "claude-code installed for ${_CLAUDE_TARGET_USER}"
     else
         yellow "claude-code: could not install — agent-mode restore will not work"
     fi
