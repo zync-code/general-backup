@@ -221,6 +221,19 @@ Exit codes: `0` ok · `1` user error · `2` integrity error · `3` partial resto
 
 ---
 
+## Lessons from real migrations
+
+Every bug found and fixed during an actual server migration is logged in
+[`MIGRATION-RUNBOOK.md`](./MIGRATION-RUNBOOK.md), in detail, with root causes
+— not just a changelog. Read it before doing another migration; it covers
+things like: pip packages never being reinstalled on restore, secrets
+double-nesting that silently broke Postgres role/sudoers restore, API keys
+sitting in plaintext dotfiles, `pm2 startup` needing to run as root, scripts
+that live outside `$HOME` (`/usr/local/bin`) never being captured, and
+projects that exist on GitHub but were never registered in `projects.json`.
+
+---
+
 ## Failure-mode FAQ
 
 **Q: Capture failed mid-run. Do I lose everything?**

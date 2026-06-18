@@ -375,6 +375,59 @@ items already known from pass two (the `backup/uncommitted-modules-*` branch
 needs a human merge decision; the `*.landlify.com` wildcard cert needs a
 manual DNS-01 TXT record if it's actually used).
 
+## Fourth audit pass (2026-06-18) — "make sure env vars end up where they belong"
+
+Asked to double-check environment variables and to push every
+`general-backup` learning to GitHub. Found 2 more bugs, both fixed:
+
+1. **Secrets-staging double-nesting bug.** `secrets.py`'s
+   `_collect_from_secrets_staging` wrapped every item from
+   `ctx.secrets_staging` in an extra `system/` prefix — but `system.py`
+   already writes its own output to `ctx.secrets_dir("system")`, so the real
+   path inside the encrypted bundle ended up `system/system/sudoers.d/...`
+   and `system/postgres/roles.json` instead of `system/sudoers.d/...` and
+   `postgres/roles.json`. Every restore silently looked in the wrong place:
+   - `restore_secrets_decrypt.py`'s `_load_pg_passwords` never found
+     `roles.json`, so **Postgres role passwords were never restored** on the
+     new server (11 roles, SCRAM-SHA-256 hashes). Apps kept working here
+     because they're on local/trust auth, so this went unnoticed — applied
+     by hand now (`ALTER ROLE ... PASSWORD 'SCRAM-SHA-256$...'` straight from
+     the decrypted `roles.json`, Postgres accepts a pre-hashed value directly).
+   - Same root cause meant the `sudoers.d` install path was also broken;
+     irrelevant for *this* migration since `bot-nginx` was already copied by
+     hand in an earlier pass, but would have silently failed on a clean
+     automated restore.
+   Fixed: removed the extra `system/` wrapper — items now land at the path
+   the phase that produced them already chose.
+
+2. **API keys/tokens exported in plaintext dotfiles were never encrypted.**
+   Found `export LINEAR_API_KEY="lin_api_..."` sitting directly in `.bashrc`
+   — captured fine functionally (dotfiles are restored), but **stored
+   unencrypted** in `home-dotfiles.tar.zst`, which sits in the clear in the
+   outer bundle (only `secrets.age` is encrypted). Anyone with the `.tar.zst`
+   file — no age key needed — could read this key. Fixed in `state.py`:
+   `_archive_dotfiles` now scans every captured dotfile for lines matching
+   `export ...(API_KEY|TOKEN|SECRET|PASSWORD|ACCESS_KEY)...=`, replaces the
+   value with a `__REDACTED_SEE_SECRETS__` placeholder in the plaintext copy,
+   and stashes the real line in a new secrets-staging file
+   (`dotfile-secrets/dotfile_secrets.delta`) that only ever leaves the
+   capture host inside `secrets.age`. `restore_secrets_decrypt.py` now has a
+   matching `_install_dotfile_secrets` step that finds the placeholder in
+   the already-restored dotfile and swaps the real value back in. Verified
+   end-to-end locally (capture → redacted plaintext → decrypt → exact value
+   restored) before pushing. No other secret-looking exports were found in
+   any other captured dotfile on this server, so nothing else needed a
+   manual fix this time — but the next `capture` run on any server will
+   catch this pattern automatically.
+
+### `.cursor` / additional editor configs
+Checked: no `~/.cursor` directory exists on this server (Cursor editor was
+never used here) — nothing to migrate. `~/.claude` was already fully covered
+by the existing `state.py` archive (verified via file-by-file diff against
+the new server — the only differences are intentionally-excluded
+`file-history/` and naturally-diverging `backups/*.claude.json.backup.*`
+timestamp files that each live instance generates on its own).
+
 ## Phase 1 — Transfer bundle to NEW server
 
 ```bash
