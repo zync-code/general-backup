@@ -76,11 +76,15 @@ def _get_config_overrides() -> Dict[str, str]:
         warn(f"redis: CONFIG GET failed: {result.stderr.strip()}")
         return {}
 
-    # Output alternates key / value lines
-    lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
+    # Output alternates key / value lines. Values can legitimately be empty
+    # (e.g. requirepass unset) — do NOT filter out blank lines, or every
+    # pair after the first empty value shifts by one and silently corrupts.
+    lines = result.stdout.split("\n")
+    while lines and lines[-1] == "":
+        lines.pop()
     live: Dict[str, str] = {}
     for i in range(0, len(lines) - 1, 2):
-        live[lines[i]] = lines[i + 1]
+        live[lines[i].strip()] = lines[i + 1].strip()
 
     # Keep only keys that differ from defaults
     overrides: Dict[str, str] = {}
