@@ -11,6 +11,7 @@ Also copies ~/.orchestrator/config/projects.json → staging/state/projects.json
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -38,7 +39,7 @@ def run(ctx: Context) -> None:
     _archive_orchestrator(home, state_dir, include_logs)
     _archive_claude(home, state_dir)
     _archive_config(home, state_dir)
-    _archive_dotfiles(home, state_dir)
+    _archive_dotfiles(home, state_dir, ctx.secrets_dir("dotfile-secrets"))
     _copy_projects_json(home, state_dir)
 
     ctx.manifest.components["state"] = {
@@ -98,7 +99,29 @@ def _archive_config(home: Path, state_dir: Path) -> None:
     info("state: archived ~/.config")
 
 
-def _archive_dotfiles(home: Path, state_dir: Path) -> None:
+_SECRET_LINE_RE = re.compile(
+    r"^(\s*export\s+\w*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|ACCESS[_-]?KEY)\w*\s*=).*$",
+    re.IGNORECASE,
+)
+
+
+def _redact_secret_exports(text: str, filename: str, secret_lines: List[str]) -> str:
+    """Strip lines that export an API key/token/secret/password, returning the
+    redacted text. Matched (real) lines are appended to secret_lines so the
+    caller can stash them in the encrypted secrets channel instead.
+    """
+    out = []
+    for line in text.splitlines():
+        m = _SECRET_LINE_RE.match(line)
+        if m:
+            secret_lines.append(f"# from {filename}\n{line}")
+            out.append(f"{m.group(1)}__REDACTED_SEE_SECRETS__  # general-backup: moved to secrets.age")
+        else:
+            out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def _archive_dotfiles(home: Path, state_dir: Path, secrets_dest: Path) -> None:
     dotfiles = [".bashrc", ".profile", ".gitconfig", ".bash_profile", ".bash_aliases", ".npmrc"]
     present = [home / f for f in dotfiles if (home / f).exists()]
     if not present:
@@ -106,11 +129,26 @@ def _archive_dotfiles(home: Path, state_dir: Path) -> None:
 
     # Create a temp dir with just the dotfiles and tar it
     import tempfile
+    secret_lines: List[str] = []
     with tempfile.TemporaryDirectory(prefix="gb-dotfiles-") as tmp:
         tmp_path = Path(tmp)
         for df in present:
-            shutil.copy2(df, tmp_path / df.name)
+            text = df.read_text(encoding="utf-8", errors="surrogateescape")
+            redacted = _redact_secret_exports(text, df.name, secret_lines)
+            (tmp_path / df.name).write_text(redacted, encoding="utf-8")
+            shutil.copystat(df, tmp_path / df.name)
         _tar_zstd(tmp_path, state_dir / "home-dotfiles.tar.zst")
+
+    if secret_lines:
+        secrets_dest.mkdir(parents=True, exist_ok=True)
+        (secrets_dest / "dotfile_secrets.delta").write_text(
+            "\n".join(secret_lines) + "\n", encoding="utf-8"
+        )
+        warn(
+            f"state: found {len(secret_lines)} secret-looking export(s) in dotfiles "
+            "(API key/token/password) — redacted from the plaintext bundle, "
+            "moved to secrets.age instead"
+        )
 
     info(f"state: archived {len(present)} dotfile(s)")
 

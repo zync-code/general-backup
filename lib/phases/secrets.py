@@ -137,12 +137,17 @@ def _collect_claude_json(home: Path, dest: Path) -> None:
 
 
 def _collect_from_secrets_staging(staging: Path, dest: Path) -> None:
-    """Copy files from the capture-side secrets staging dir (shadow, sudoers, pg roles)."""
+    """Copy files from the capture-side secrets staging dir (shadow, sudoers,
+    pg roles, dotfile-secrets — each already named/nested correctly by the
+    phase that wrote it via ctx.secrets_dir(...), e.g. "system", "postgres").
+    Do NOT add another "system/" wrapper here — restore reads these back at
+    e.g. secrets_dir/"postgres"/"roles.json", not secrets_dir/"system"/"postgres"/....
+    """
     if not staging or not staging.exists():
         return
     import shutil
     for item in staging.iterdir():
-        dst = dest / "system" / item.name
+        dst = dest / item.name
         if item.is_dir():
             shutil.copytree(item, dst, dirs_exist_ok=True)
         else:

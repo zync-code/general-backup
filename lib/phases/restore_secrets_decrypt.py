@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -92,6 +93,10 @@ def run(ctx: RestoreContext) -> None:
     # Install shadow + sudoers (from system/ sub-dir in secrets)
     _install_shadow_sudoers(secrets_dir)
 
+    # Restore secret env-var exports that were redacted out of dotfiles at
+    # capture time (e.g. `export LINEAR_API_KEY=...` in .bashrc)
+    _install_dotfile_secrets(secrets_dir, home)
+
     # Load postgres role passwords into extras for the postgres phase
     _load_pg_passwords(secrets_dir, ctx)
 
@@ -141,6 +146,52 @@ def _install_env_files(secrets_dir: Path, ctx: RestoreContext) -> None:
             installed += 1
     if installed:
         info(f"restore/secrets-decrypt: installed {installed} env file(s)")
+
+
+def _install_dotfile_secrets(secrets_dir: Path, home: Path) -> None:
+    """Re-inject secret export lines that capture redacted out of dotfiles.
+
+    dotfile_secrets.delta has blocks like:
+        # from .bashrc
+        export LINEAR_API_KEY="lin_api_..."
+    The matching placeholder line in the already-restored dotfile (written
+    by state-extract, earlier in the phase order) looks like:
+        export LINEAR_API_KEY=__REDACTED_SEE_SECRETS__  # general-backup: ...
+    """
+    delta = secrets_dir / "dotfile-secrets" / "dotfile_secrets.delta"
+    if not delta.exists():
+        return
+
+    target_file = None
+    restored = 0
+    for line in delta.read_text(encoding="utf-8").splitlines():
+        if line.startswith("# from "):
+            target_file = line[len("# from "):].strip()
+            continue
+        if not line.strip() or target_file is None:
+            continue
+        real_line = line
+        key_match = re.match(r"^\s*export\s+(\w+)\s*=", real_line)
+        if not key_match:
+            continue
+        key = key_match.group(1)
+        dotfile_path = home / target_file
+        if not dotfile_path.exists():
+            warn(f"restore/secrets-decrypt: {target_file} not found — cannot restore {key}")
+            continue
+        text = dotfile_path.read_text(encoding="utf-8")
+        placeholder_re = re.compile(
+            rf"^\s*export\s+{re.escape(key)}\s*=__REDACTED_SEE_SECRETS__.*$", re.MULTILINE
+        )
+        new_text, n = placeholder_re.subn(real_line, text)
+        if n:
+            dotfile_path.write_text(new_text, encoding="utf-8")
+            restored += 1
+        else:
+            warn(f"restore/secrets-decrypt: placeholder for {key} not found in {target_file}")
+
+    if restored:
+        info(f"restore/secrets-decrypt: restored {restored} secret env var(s) into dotfiles")
 
 
 def _install_shadow_sudoers(secrets_dir: Path) -> None:
