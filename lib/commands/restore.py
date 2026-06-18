@@ -68,6 +68,11 @@ def run(args, phases: List[str]) -> int:
         shutil.rmtree(staging_dir, ignore_errors=True)
         return EXIT_INTEGRITY
 
+    # Phases run as different OS users (postgres, bot) that need to read files
+    # under the staging dir. secrets.age stays encrypted regardless of perms.
+    staging_dir.chmod(0o755)
+    subprocess.run(["chmod", "-R", "a+rX", str(staging_dir)])
+
     tops = [p for p in staging_dir.iterdir() if p.is_dir()]
     if not tops:
         error("bundle appears empty")

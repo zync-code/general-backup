@@ -25,14 +25,14 @@ def run(ctx: RestoreContext) -> None:
         info(f"restore/projects-clone: [{name}] cloning {git_url} @ {sha[:8]}")
 
         try:
-            _clone_or_fetch(proj_dir, git_url, sha)
+            _clone_or_fetch(proj_dir, git_url, sha, ctx.target_user)
         except Exception as exc:
             warn(f"restore/projects-clone: [{name}] git failed: {exc} — marking degraded")
             degraded.append(name)
             continue
 
         # pnpm install (best-effort)
-        _pnpm_install(proj_dir, name, degraded)
+        _pnpm_install(proj_dir, name, degraded, ctx.target_user)
 
     if degraded:
         warn(
@@ -58,37 +58,41 @@ def run(ctx: RestoreContext) -> None:
         warn(f"restore/projects-clone: chown failed: {exc}")
 
 
-def _clone_or_fetch(proj_dir: Path, git_url: str, sha: str) -> None:
+def _as_user(user: str, *cmd: str) -> List[str]:
+    return ["sudo", "-u", user, "-H", "--"] + list(cmd)
+
+
+def _clone_or_fetch(proj_dir: Path, git_url: str, sha: str, user: str) -> None:
     if (proj_dir / ".git").exists():
         # Repo already exists — fetch and reset
         subprocess.run(
-            ["git", "-C", str(proj_dir), "fetch", "--quiet", "origin"],
+            _as_user(user, "git", "-C", str(proj_dir), "fetch", "--quiet", "origin"),
             check=True, capture_output=True,
         )
         subprocess.run(
-            ["git", "-C", str(proj_dir), "reset", "--hard", sha],
+            _as_user(user, "git", "-C", str(proj_dir), "reset", "--hard", sha),
             check=True, capture_output=True,
         )
     else:
-        proj_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(_as_user(user, "mkdir", "-p", str(proj_dir)), check=True)
         subprocess.run(
-            ["git", "clone", "--quiet", git_url, str(proj_dir)],
+            _as_user(user, "git", "clone", "--quiet", git_url, str(proj_dir)),
             check=True, capture_output=True,
         )
         subprocess.run(
-            ["git", "-C", str(proj_dir), "checkout", sha],
+            _as_user(user, "git", "-C", str(proj_dir), "checkout", sha),
             check=True, capture_output=True,
         )
 
 
-def _pnpm_install(proj_dir: Path, name: str, degraded: List[str]) -> None:
+def _pnpm_install(proj_dir: Path, name: str, degraded: List[str], user: str) -> None:
     package_json = proj_dir / "package.json"
     if not package_json.exists():
         return  # not a Node project
 
     info(f"restore/projects-clone: [{name}] pnpm install --frozen-lockfile")
     result = subprocess.run(
-        ["pnpm", "install", "--frozen-lockfile"],
+        _as_user(user, "pnpm", "install", "--frozen-lockfile"),
         cwd=proj_dir,
         capture_output=True, text=True,
     )
